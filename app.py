@@ -61,6 +61,8 @@ def get_clips_segments():
     clips = []
 
     for i, timestamp in enumerate(timestamps):
+        if "nl" in timestamps[i][0]:
+            continue
         if i != len(timestamps) -1:
             end = timestamps[i + 1][1]
         else:
@@ -104,21 +106,50 @@ def generate_clips():
         progress.config(value=percent_progress)
         tela.update_idletasks()
 
-        if end:
-            start_dt = datetime.strptime(start, "%H:%M:%S")
-            end_dt = datetime.strptime(end, "%H:%M:%S")
+        enable_fade_in = fade_in_var.get()
+        enable_fade_out = fade_out_var.get()
 
-            duration = (end_dt - start_dt)
-            total_seconds = int(duration.total_seconds())
+        start_dt = datetime.strptime(start, "%H:%M:%S")
+        end_dt = datetime.strptime(end, "%H:%M:%S")
 
-            hours = total_seconds // 3600
-            minutes = (total_seconds % 3600) // 60
-            seconds = total_seconds % 60
+        duration = (end_dt - start_dt)
+        total_seconds = int(duration.total_seconds())
 
-            duration_str = f"{hours:02}:{minutes:02}:{seconds:02}"
-            cmd = f'ffmpeg -ss {start} -i "{path}" -t {duration_str} -c copy "{title}.mp4"'
+        hours = total_seconds // 3600
+        minutes = (total_seconds % 3600) // 60
+        seconds = total_seconds % 60
+
+        duration_str = f"{hours:02}:{minutes:02}:{seconds:02}"
+
+        if not enable_fade_in and not enable_fade_out:
+            #Habilita a copia do input p/ o input
+            if end:
+
+                cmd = f'ffmpeg -ss {start} -i "{path}" -t {duration_str} -c copy "{title}.mp4"'
+            else:
+                cmd = f'ffmpeg -ss {start} -i "{path}" -c copy "{title}.mp4"'
         else:
-            cmd = f'ffmpeg -ss {start} -i "{path}" -c copy "{title}.mp4"'
+            # Habilita o render do input p/ o input (uso do fade-in e fadeout):
+            # Aviso: o fade-in e fade-out não funcionam no último clipe
+            filters = []
+            fade_duration = 1.4
+            if enable_fade_out and total_seconds > fade_duration and end is not None:
+                filters.append(f"fade=t=out:st={total_seconds - fade_duration}:d={fade_duration}")
+            if enable_fade_in:
+                filters.append(f"fade=t=in:st=0:d={fade_duration}")
+            vf = ""
+            if len(filters) > 0 :
+                vf = ",".join(filters)
+
+            cmd = (
+                f'ffmpeg -ss {start} -i "{path}" '
+                f'-t {duration_str} '
+                f'-vf "{vf}" '
+                f'-c:v libx264 -c:a copy '
+                f'"{title}.mp4"'
+            )
+
+
 
         txt_saida.insert(tk.END, f"Clipe {i + 1}: Completo - {i + 1}/{total_segments}\n")
 
@@ -240,6 +271,38 @@ txt_saida.pack(pady=5)
 
 progress = Progressbar(tela, orient="horizontal", length=200, maximum=100)
 progress.pack(pady=15)
+
+
+# Frame das opções
+frame_opcoes = tk.Frame(tela, bg="#7F14B7")
+frame_opcoes.pack(pady=10)
+
+fade_in_var = tk.BooleanVar()
+fade_out_var = tk.BooleanVar()
+
+check_fade_in = tk.Checkbutton(
+    frame_opcoes,
+    text="Fade In",
+    variable=fade_in_var,
+    bg="#7F14B7",
+    fg="#FEF500",
+    selectcolor="#7F14B7",
+    font=("Industry-Black", 10, "bold")
+)
+
+check_fade_in.pack(side="left", padx=10)
+
+check_fade_out = tk.Checkbutton(
+    frame_opcoes,
+    text="Fade Out",
+    variable=fade_out_var,
+    bg="#7F14B7",
+    fg="#FEF500",
+    selectcolor="#7F14B7",
+    font=("Industry-Black", 10, "bold")
+)
+
+check_fade_out.pack(side="left", padx=10)
 
 # Inicia a interface
 tela.mainloop()

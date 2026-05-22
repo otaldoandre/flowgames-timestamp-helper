@@ -105,7 +105,18 @@ def generate_clips():
         tela.update_idletasks()
 
         if end:
-            cmd = f'ffmpeg -ss {start} -i "{path}" -t {end} -c copy "{title}.mp4"'
+            start_dt = datetime.strptime(start, "%H:%M:%S")
+            end_dt = datetime.strptime(end, "%H:%M:%S")
+
+            duration = (end_dt - start_dt)
+            total_seconds = int(duration.total_seconds())
+
+            hours = total_seconds // 3600
+            minutes = (total_seconds % 3600) // 60
+            seconds = total_seconds % 60
+
+            duration_str = f"{hours:02}:{minutes:02}:{seconds:02}"
+            cmd = f'ffmpeg -ss {start} -i "{path}" -t {duration_str} -c copy "{title}.mp4"'
         else:
             cmd = f'ffmpeg -ss {start} -i "{path}" -c copy "{title}.mp4"'
 

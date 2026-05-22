@@ -160,20 +160,36 @@ def generate_clips_preview():
         start_dt = datetime.strptime(start, "%H:%M:%S")
         preview_duration = timedelta(seconds=5)
 
-        valid_start = (start_dt + preview_duration).strftime("%H:%M:%S")
-        print(f"Start: {start} | Valid start: {valid_start}")
+        valid_start = (start_dt + preview_duration)
+        #print(f"Start: {start} | Valid start: {valid_start}")
 
         if end:
+
+            end_dt = datetime.strptime(end, "%H:%M:%S")
+
+            duration = (end_dt - valid_start)
+            total_seconds = int(duration.total_seconds())
+
+            hours = total_seconds // 3600
+            minutes = (total_seconds % 3600) // 60
+            seconds = total_seconds % 60
+
+            duration_str = f"{hours:02}:{minutes:02}:{seconds:02}"
             #Start
-            cmd_start_preview = (f'ffmpeg -i {path} -ss {start} -to {valid_start}'
-                                 f' -c copy "{title}_preview_start.mp4"')
+            cmd_start_preview = (
+                f'ffmpeg -ss {start} -i "{path}" '
+                f'-t 5 -c copy "{title}_preview_start.mp4"'
+            )
 
             #End
             end_dt = datetime.strptime(end, "%H:%M:%S")
 
-            valid_end = (end_dt - preview_duration).strftime("%H:%M:%S")
-            cmd_end_preview = (f'ffmpeg -i {path} -ss {valid_end} -to {end} -c copy '
-                               f'"{title}_preview_end.mp4"')
+            valid_end = end_dt - preview_duration
+            valid_end_str = valid_end.strftime("%H:%M:%S")
+            cmd_end_preview = (
+                f'ffmpeg -ss {valid_end_str} -i "{path}" '
+                f'-t 5 -c copy "{title}_preview_end.mp4"'
+            )
 
         else:
             # Possible feature: add an end preview to the last clip with ffprobe (we need to find the duration of the

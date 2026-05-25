@@ -89,67 +89,176 @@ def generate_clips():
     if segments is None:
         return
 
-    #Formata para exibir apenas o dia (DD/MM/AAAA) e o horário (HH:MM)
+    ## Config ##
+    enable_fade_in = fade_in_var.get()
+    enable_fade_out = fade_out_var.get()
+
+    enable_endslate = endslate_var.get()
+    endslate_path = endslate_path_var.get()
+    if enable_endslate and not endslate_path:
+        messagebox.showerror(
+            "Erro",
+            "Selecione um vídeo de endslate!"
+        )
+
+        return
+    fade_duration = 1.4
+
+    ## Pasta de Output ##
     date = datetime.now().strftime("%d/%m/%Y %H:%M")
     date = get_clean_title(date)
 
     os.mkdir(f"cortes - {date}")
     os.chdir(f"./cortes - {date}")
 
+    ## Processamento dos segmentos ##
     total_segments = len(segments)
     for i, seg in enumerate(segments):
         start = seg["start"]
         end = seg["end"]
         title = seg["title"]
 
+        # Barra de progresso
         percent_progress = ((i + 1) / total_segments) * 100
         progress.config(value=percent_progress)
         tela.update_idletasks()
 
-        enable_fade_in = fade_in_var.get()
-        enable_fade_out = fade_out_var.get()
 
-        start_dt = datetime.strptime(start, "%H:%M:%S")
-        end_dt = datetime.strptime(end, "%H:%M:%S")
+        ## Calculo de duração dos segmentos
+        total_seconds = None
+        duration_str = None
+        if end is not None:
+            start_dt = datetime.strptime(start, "%H:%M:%S")
+            end_dt = datetime.strptime(end, "%H:%M:%S")
 
-        duration = (end_dt - start_dt)
-        total_seconds = int(duration.total_seconds())
+            duration = (end_dt - start_dt)
+            total_seconds = int(duration.total_seconds())
 
-        hours = total_seconds // 3600
-        minutes = (total_seconds % 3600) // 60
-        seconds = total_seconds % 60
+            hours = total_seconds // 3600
+            minutes = (total_seconds % 3600) // 60
+            seconds = total_seconds % 60
 
-        duration_str = f"{hours:02}:{minutes:02}:{seconds:02}"
-
-        if not enable_fade_in and not enable_fade_out:
+            duration_str = f"{hours:02}:{minutes:02}:{seconds:02}"
             #Habilita a copia do input p/ o input
             if end:
 
                 cmd = f'ffmpeg -ss {start} -i "{path}" -t {duration_str} -c copy "{title}.mp4"'
             else:
                 cmd = f'ffmpeg -ss {start} -i "{path}" -c copy "{title}.mp4"'
+
+        needs_render = (
+                enable_fade_in
+                or enable_fade_out
+                or enable_endslate
+        )
+        if not needs_render:
+            if end:
+                cmd = (
+                    f'ffmpeg -ss {start} '
+                    f'-i "{path}" '
+                    f'-t {duration_str} '
+                    f'-c copy '
+                    f'"{title}.mp4"'
+                )
+            else:
+
+                cmd = (
+                    f'ffmpeg -ss {start} '
+                    f'-i "{path}" '
+                    f'-c copy '
+                    f'"{title}.mp4"'
+                )
         else:
             # Habilita o render do input p/ o input (uso do fade-in e fadeout):
             # Aviso: o fade-in e fade-out não funcionam no último clipe
             filters = []
-            fade_duration = 1.4
+
             if enable_fade_out and total_seconds > fade_duration and end is not None:
-                filters.append(f"fade=t=out:st={total_seconds - fade_duration}:d={fade_duration}")
+                filters.append(
+                    f"fade=t=out:"
+                    f"st={total_seconds - fade_duration}:"
+                    f"d={fade_duration}"
+                )
             if enable_fade_in:
-                filters.append(f"fade=t=in:st=0:d={fade_duration}")
-            vf = ""
-            if len(filters) > 0 :
-                vf = ",".join(filters)
+                filters.append(
+                    f"fade=t=in:"
+                    f"st=0:"
+                    f"d={fade_duration}"
+                )
+            vf = ",".join(filters)
 
-            cmd = (
-                f'ffmpeg -ss {start} -i "{path}" '
-                f'-t {duration_str} '
-                f'-vf "{vf}" '
-                f'-c:v libx264 -c:a copy '
-                f'"{title}.mp4"'
-            )
+            vf_cmd = ""
 
+            if vf:
+                vf_cmd = f'-vf "{vf}"'
 
+            temp_output = f"temp_{title}.mp4"
+
+            ## Render
+            if end:
+                cmd_render = (
+                    f'ffmpeg '
+                    f'-ss {start} '
+                    f'-i "{path}" '
+                    f'-t {duration_str} '
+                    f'{vf_cmd} '
+                    f'-c:v libx264 '
+                    f'-preset veryfast '
+                    f'-c:a copy '
+                    f'"{temp_output}"'
+                )
+
+            else:
+                cmd_render = (
+                    f'ffmpeg '
+                    f'-ss {start} '
+                    f'-i "{path}" '
+                    f'{vf_cmd} '
+                    f'-c:v libx264 '
+                    f'-preset veryfast '
+                    f'-c:a copy '
+                    f'"{temp_output}"'
+                )
+            if not enable_endslate:
+
+                final_output = f"{title}.mp4"
+
+                cmd_finalize = (
+                    f'ffmpeg '
+                    f'-i "{temp_output}" '
+                    f'-c copy '
+                    f'"{final_output}"'
+                )
+
+                cmd = (
+                        cmd_render
+                        + " && " +
+                        cmd_finalize
+                )
+            # Se tiver endslate
+            else:
+
+                final_output = f"{title}.mp4"
+
+                cmd_concat = (
+                    f'ffmpeg '
+                    f'-i "{temp_output}" '
+                    f'-i "{endslate_path}" '
+                    f'-filter_complex '
+                    f'"[0:v][0:a][1:v][1:a]'
+                    f'concat=n=2:v=1:a=1[v][a]" '
+                    f'-map "[v]" '
+                    f'-map "[a]" '
+                    f'-c:v libx264 '
+                    f'-preset veryfast '
+                    f'"{final_output}"'
+                )
+
+                cmd = (
+                        cmd_render
+                        + " && " +
+                        cmd_concat
+                )
 
         txt_saida.insert(tk.END, f"Clipe {i + 1}: Completo - {i + 1}/{total_segments}\n")
 
@@ -239,6 +348,17 @@ def generate_clips_preview():
 
         os.system(cmd)
 
+def select_endslate():
+
+    file_path = filedialog.askopenfilename(
+        title="Selecione o vídeo de endslate",
+        filetypes=[("MP4 files", "*.mp4")]
+    )
+
+    if file_path:
+        endslate_path_var.set(file_path)
+
+
 # Configuração da interface
 tela = tk.Tk()
 print(font.families())
@@ -263,6 +383,7 @@ btn_criar_cortes.pack(side="left", padx=15)
 btn_criar_previews = tk.Button(frame_botoes, text="Criar preview de cortes", command=generate_clips_preview, bg="#FEF500", fg="#7F14B7", font=("Industry-Black", 10, "bold"))
 btn_criar_previews.pack(side="left", padx=15)
 
+
 lbl_saida = tk.Label(tela, text="Progresso:", bg="#7F14B7", fg="#FEF500", font=("Industry-Black", 12, "bold"))
 lbl_saida.pack(pady=10)
 
@@ -277,8 +398,14 @@ progress.pack(pady=15)
 frame_opcoes = tk.Frame(tela, bg="#7F14B7")
 frame_opcoes.pack(pady=10)
 
+frame_endslate = tk.Frame(tela, bg="#7F14B7")
+frame_endslate.pack(pady=5)
+
+# Vars
 fade_in_var = tk.BooleanVar()
 fade_out_var = tk.BooleanVar()
+endslate_var = tk.BooleanVar()
+endslate_path_var = tk.StringVar()
 
 check_fade_in = tk.Checkbutton(
     frame_opcoes,
@@ -303,6 +430,41 @@ check_fade_out = tk.Checkbutton(
 )
 
 check_fade_out.pack(side="left", padx=10)
+
+check_endslate = tk.Checkbutton(
+    frame_opcoes,
+    text="Usar Endslate",
+    variable=endslate_var,
+    bg="#7F14B7",
+    fg="#FEF500",
+    selectcolor="#7F14B7",
+    font=("Industry-Black", 10, "bold")
+)
+
+check_endslate.pack(side="left", padx=10)
+
+btn_select_endslate = tk.Button(
+    frame_endslate,
+    text="Selecionar Endslate",
+    command=select_endslate,
+    bg="#FEF500",
+    fg="#7F14B7",
+    font=("Industry-Black", 10, "bold")
+)
+
+btn_select_endslate.pack(side="left", padx=10)
+
+lbl_endslate = tk.Label(
+    frame_endslate,
+    textvariable=endslate_path_var,
+    bg="#7F14B7",
+    fg="#FFFFFF",
+    wraplength=500,
+    justify="left"
+)
+
+lbl_endslate.pack(side="left")
+
 
 # Inicia a interface
 tela.mainloop()

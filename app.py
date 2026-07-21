@@ -95,6 +95,17 @@ def generate_clips():
 
     enable_endslate = endslate_var.get()
     endslate_path = endslate_path_var.get()
+
+    enable_logo = logo_var.get()
+    logo_path = logo_path_var.get()
+
+    if enable_logo and not logo_path:
+        messagebox.showerror(
+            "Erro",
+            "Selecione uma logo!"
+        )
+        return
+
     if enable_endslate and not endslate_path:
         messagebox.showerror(
             "Erro",
@@ -139,17 +150,11 @@ def generate_clips():
             seconds = total_seconds % 60
 
             duration_str = f"{hours:02}:{minutes:02}:{seconds:02}"
-            #Habilita a copia do input p/ o input
-            if end:
-
-                cmd = f'ffmpeg -ss {start} -i "{path}" -t {duration_str} -c copy "{title}.mp4"'
-            else:
-                cmd = f'ffmpeg -ss {start} -i "{path}" -c copy "{title}.mp4"'
-
         needs_render = (
                 enable_fade_in
                 or enable_fade_out
                 or enable_endslate
+                or enable_logo
         )
         if not needs_render:
             if end:
@@ -185,25 +190,59 @@ def generate_clips():
                     f"st=0:"
                     f"d={fade_duration}"
                 )
-            vf = ",".join(filters)
-
-            vf_cmd = ""
-
-            if vf:
-                vf_cmd = f'-vf "{vf}"'
-
+            filter_complex = ""
             temp_output = f"temp_{title}.mp4"
 
+            # Se tiver logo
+            if enable_logo:
+
+                if len(filters) > 0:
+                    video_chain = ",".join(filters)
+                else:
+                    video_chain = "null"
+
+                filter_complex = (
+                    f'"[1:v]scale=227:227[logo];'
+                    f'[0:v]scale=1920:1080,{video_chain}[base];'
+                    f'[base][logo]overlay=W-w-40:40[outv]"'
+                )
+
+            else:
+                if len(filters) > 0:
+                    filter_complex = (
+                        f'"[0:v]{",".join(filters)}[outv]"'
+                    )
+
+
+            filter_complex_cmd = ""
+            map_video = '-map 0:v'
+
+            if filter_complex:
+                filter_complex_cmd = (
+                    f'-filter_complex {filter_complex}'
+                )
+
+                map_video = '-map "[outv]"'
+            if enable_logo:
+
+                input_logo = f'-i "{logo_path}"'
+
+            else:
+                input_logo = ""
             ## Render
             if end:
                 cmd_render = (
                     f'ffmpeg '
                     f'-ss {start} '
                     f'-i "{path}" '
+                    f'{input_logo} '
                     f'-t {duration_str} '
-                    f'{vf_cmd} '
-                    f'-c:v libx264 '
-                    f'-preset veryfast '
+                    f'{filter_complex_cmd} '
+                    f'{map_video} '
+                    f'-map 0:a '
+                    f'-c:v h264_nvenc '
+                    f'-preset p5 '
+                    f'-cq 23 '
                     f'-c:a copy '
                     f'"{temp_output}"'
                 )
@@ -213,9 +252,13 @@ def generate_clips():
                     f'ffmpeg '
                     f'-ss {start} '
                     f'-i "{path}" '
-                    f'{vf_cmd} '
-                    f'-c:v libx264 '
-                    f'-preset veryfast '
+                    f'{input_logo} '
+                    f'{filter_complex_cmd} '
+                    f'{map_video} '
+                    f'-map 0:a '
+                    f'-c:v h264_nvenc '
+                    f'-preset p5 '
+                    f'-cq 23 '
                     f'-c:a copy '
                     f'"{temp_output}"'
                 )
@@ -249,8 +292,9 @@ def generate_clips():
                     f'concat=n=2:v=1:a=1[v][a]" '
                     f'-map "[v]" '
                     f'-map "[a]" '
-                    f'-c:v libx264 '
-                    f'-preset veryfast '
+                    f'-c:v h264_nvenc '
+                    f'-preset p5 '
+                    f'-cq 23 '
                     f'"{final_output}"'
                 )
 
@@ -263,6 +307,7 @@ def generate_clips():
         txt_saida.insert(tk.END, f"Clipe {i + 1}: Completo - {i + 1}/{total_segments}\n")
 
         os.system(cmd)
+        print(cmd)
 
 
 def generate_clips_preview():
@@ -401,11 +446,16 @@ frame_opcoes.pack(pady=10)
 frame_endslate = tk.Frame(tela, bg="#7F14B7")
 frame_endslate.pack(pady=5)
 
+frame_logo = tk.Frame(tela, bg="#7F14B7")
+frame_logo.pack(pady=10)
+
 # Vars
 fade_in_var = tk.BooleanVar()
 fade_out_var = tk.BooleanVar()
 endslate_var = tk.BooleanVar()
 endslate_path_var = tk.StringVar()
+logo_var = tk.BooleanVar()
+logo_path_var = tk.StringVar()
 
 check_fade_in = tk.Checkbutton(
     frame_opcoes,
@@ -465,6 +515,50 @@ lbl_endslate = tk.Label(
 
 lbl_endslate.pack(side="left")
 
+lbl_logo = tk.Label(
+    frame_logo,
+    textvariable=logo_path_var,
+    bg="#7F14B7",
+    fg="#FFFFFF",
+    wraplength=500
+)
+
+lbl_logo.pack(side="left")
+
+def select_logo():
+    path = filedialog.askopenfilename(
+        title="Selecione a logo",
+        filetypes=[
+            ("PNG files", "*.png"),
+            ("Image files", "*.png *.jpg *.jpeg")
+        ]
+    )
+
+    if path:
+        logo_path_var.set(path)
+
+check_logo = tk.Checkbutton(
+    frame_opcoes,
+    text="Adicionar Logo",
+    variable=logo_var,
+    bg="#7F14B7",
+    fg="#FEF500",
+    selectcolor="#7F14B7",
+    font=("Industry-Black", 10, "bold")
+)
+
+check_logo.pack(side="left", padx=10)
+
+btn_logo = tk.Button(
+    frame_logo,
+    text="Selecionar Logo",
+    command=select_logo,
+    bg="#FEF500",
+    fg="#7F14B7",
+    font=("Industry-Black", 10, "bold")
+)
+
+btn_logo.pack(side="left", padx=10)
 
 # Inicia a interface
 tela.mainloop()

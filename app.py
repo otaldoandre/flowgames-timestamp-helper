@@ -6,6 +6,8 @@ from tkinter.ttk import *
 import unicodedata
 import re
 import os
+import subprocess
+import shutil
 
 def get_clean_title(title):
     #Remove acentos
@@ -75,14 +77,109 @@ def get_clips_segments():
         })
     return clips
 
+
+## --- Download via YouTube (yt-dlp) --- ##
+
+def check_ytdlp_installed():
+    return shutil.which("yt-dlp") is not None
+
+
+def download_youtube_video(url, output_dir):
+    """Baixa o vídeo do YouTube (via yt-dlp) para output_dir e retorna o caminho do arquivo .mp4 baixado."""
+    output_template = os.path.join(output_dir, "%(title)s.%(ext)s")
+
+    txt_saida.insert(tk.END, "Baixando vídeo do YouTube, aguarde...\n")
+    txt_saida.see(tk.END)
+    tela.update_idletasks()
+
+    cmd = [
+        "yt-dlp",
+        "-f", "bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best",
+        "--merge-output-format", "mp4",
+        "--no-playlist",
+        "-o", output_template,
+        url,
+    ]
+
+    result = subprocess.run(cmd, capture_output=True, text=True)
+
+    if result.returncode != 0:
+        erro = result.stderr.strip().splitlines()[-1] if result.stderr.strip() else "Erro desconhecido"
+        messagebox.showerror("Erro", f"Falha ao baixar o vídeo do YouTube:\n{erro}")
+        return None
+
+    # Pergunta ao yt-dlp qual seria o nome final do arquivo, para localiza-lo
+    filename_cmd = [
+        "yt-dlp",
+        "--get-filename",
+        "-f", "bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best",
+        "--merge-output-format", "mp4",
+        "--no-playlist",
+        "-o", output_template,
+        url,
+    ]
+    filename_result = subprocess.run(filename_cmd, capture_output=True, text=True)
+    filepath = filename_result.stdout.strip()
+
+    if not filepath or not os.path.exists(filepath):
+        # Fallback: pega o .mp4 mais recente na pasta de download
+        mp4_files = [f for f in os.listdir(output_dir) if f.lower().endswith(".mp4")]
+        if not mp4_files:
+            messagebox.showerror("Erro", "O download terminou, mas o arquivo baixado não foi encontrado.")
+            return None
+        mp4_files.sort(key=lambda f: os.path.getmtime(os.path.join(output_dir, f)), reverse=True)
+        filepath = os.path.join(output_dir, mp4_files[0])
+
+    txt_saida.insert(tk.END, f"Download concluído: {os.path.basename(filepath)}\n")
+    txt_saida.see(tk.END)
+    tela.update_idletasks()
+
+    return filepath
+
+
+def get_video_source():
+    """
+    Retorna o caminho do vídeo a ser cortado.
+    Se houver um link no campo de YouTube, baixa o vídeo via yt-dlp.
+    Caso contrário, abre o diálogo de seleção de arquivo local (comportamento original).
+    """
+    youtube_url = youtube_link_var.get().strip()
+
+    if youtube_url:
+        if not check_ytdlp_installed():
+            messagebox.showerror(
+                "Erro",
+                "yt-dlp não foi encontrado no sistema.\n"
+                "Instale com: pip install yt-dlp\n"
+                "(e garanta que esteja no PATH)."
+            )
+            return None
+
+        download_dir = filedialog.askdirectory(
+            title="Selecione a pasta onde o vídeo baixado será salvo"
+        )
+        if not download_dir:
+            messagebox.showerror("Erro", "Nenhuma pasta selecionada! Tente novamente.")
+            return None
+
+        return download_youtube_video(youtube_url, download_dir)
+
+    else:
+        path = filedialog.askopenfilename(
+            title="Selecione a live full",
+            filetypes=[("MP4 files", "*.mp4")]
+        )
+        if not path:
+            messagebox.showerror("Erro", "O arquivo não foi selecionado! Tente novamente.")
+            return None
+        return path
+
+
 def generate_clips():
-    # A função assume que o usuário selecionou o arquivo de live correto, onde todos timestamps contidos no arquivo
-    path = filedialog.askopenfilename(
-        title="Selecione a live full",
-        filetypes=[("MP4 files", "*.mp4")]
-    )
+    # A função assume que o usuário informou o link do YouTube (baixa via yt-dlp)
+    # ou selecionou o arquivo de live correto, onde todos timestamps contidos no arquivo
+    path = get_video_source()
     if not path:
-        messagebox.showerror("Erro", "O arquivo não foi selecionado! Tente novamente.")
         return
 
     segments = get_clips_segments()
@@ -311,13 +408,10 @@ def generate_clips():
 
 
 def generate_clips_preview():
-    # A função assume que o usuário selecionou o arquivo de live correto, onde todos timestamps contidos no arquivo
-    path = filedialog.askopenfilename(
-        title="Selecione a live full",
-        filetypes=[("MP4 files", "*.mp4")]
-    )
+    # A função assume que o usuário informou o link do YouTube (baixa via yt-dlp)
+    # ou selecionou o arquivo de live correto, onde todos timestamps contidos no arquivo
+    path = get_video_source()
     if not path:
-        messagebox.showerror("Erro", "O arquivo não foi selecionado! Tente novamente.")
         return
 
     segments = get_clips_segments()
@@ -408,7 +502,7 @@ def select_endslate():
 tela = tk.Tk()
 print(font.families())
 tela.title("Crie cortes com base nas timestamps!")
-tela.geometry("900x700")
+tela.geometry("900x760")
 tela.configure(bg="#7F14B7")
 
 lbl_instrucao = tk.Label(tela, text="Cole as timestamps aqui:", bg="#7F14B7", fg="#FEF500", font=("Industry-Black", 12, "bold"))
@@ -417,6 +511,23 @@ lbl_instrucao.pack(pady=10)
 # Campo de texto para entrada de timestamps
 txt_entrada = scrolledtext.ScrolledText(tela, width=80, height=14, bg="#FFFFFF", fg="#000000")
 txt_entrada.pack(pady=5)
+
+# Frame para o link do YouTube (opcional - se preenchido, baixa via yt-dlp em vez de pedir arquivo local)
+frame_youtube = tk.Frame(tela, bg="#7F14B7")
+frame_youtube.pack(pady=8)
+
+lbl_youtube = tk.Label(
+    frame_youtube,
+    text="Link do YouTube (opcional, deixe vazio para usar arquivo local):",
+    bg="#7F14B7",
+    fg="#FEF500",
+    font=("Industry-Black", 10, "bold")
+)
+lbl_youtube.pack(side="left", padx=5)
+
+youtube_link_var = tk.StringVar()
+entry_youtube = tk.Entry(frame_youtube, textvariable=youtube_link_var, width=45, bg="#FFFFFF", fg="#000000")
+entry_youtube.pack(side="left", padx=5)
 
 # Frame para agrupar os botões lado a lado
 frame_botoes = tk.Frame(tela, bg="#7F14B7")

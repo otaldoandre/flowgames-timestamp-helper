@@ -677,8 +677,13 @@ frame_conteudo.bind(
     lambda e: canvas_principal.configure(scrollregion=canvas_principal.bbox("all"))
 )
 
-canvas_principal.create_window((0, 0), window=frame_conteudo, anchor="nw")
+janela_conteudo = canvas_principal.create_window((0, 0), window=frame_conteudo, anchor="nw")
 canvas_principal.configure(yscrollcommand=scrollbar_principal.set)
+
+def _acompanhar_largura_canvas(event):
+    canvas_principal.itemconfig(janela_conteudo, width=event.width)
+
+canvas_principal.bind("<Configure>", _acompanhar_largura_canvas)
 
 canvas_principal.pack(side="left", fill="both", expand=True)
 scrollbar_principal.pack(side="right", fill="y")

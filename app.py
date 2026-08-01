@@ -12,6 +12,10 @@ import shutil
 # Logo padrão do canal Cortes do Flow Games — ajuste esse caminho uma única vez
 LOGO_PADRAO_PATH = r"C:\caminho\para\logo_cortes_flow_games.png"
 
+# Populado por carregar_capitulos(); guarda, por capítulo, se ele deve gerar
+# corte e/ou preview, além do segmento original (start/end/title)
+capitulos_vars = {}
+
 def get_clean_title(title):
     #Remove acentos
     title = unicodedata.normalize("NFD", title)
@@ -79,6 +83,22 @@ def get_clips_segments():
             "end": end
         })
     return clips
+
+
+def filtrar_segments_por_flag(segments, flag):
+    """
+    Filtra os segmentos com base nas checkboxes marcadas em carregar_capitulos().
+    Se a lista de capítulos ainda não foi carregada (capitulos_vars vazio),
+    não filtra nada — mantém o comportamento antigo de processar tudo.
+    """
+    if not capitulos_vars:
+        return segments
+    filtrados = []
+    for seg in segments:
+        info = capitulos_vars.get(seg["title"])
+        if info is None or info[flag].get():
+            filtrados.append(seg)
+    return filtrados
 
 
 ## --- Download via YouTube (yt-dlp) --- ##
@@ -208,6 +228,11 @@ def generate_clips():
 
     segments = get_clips_segments()
     if segments is None:
+        return
+
+    segments = filtrar_segments_por_flag(segments, "corte")
+    if not segments:
+        messagebox.showinfo("Aviso", "Nenhum capítulo marcado para gerar corte.")
         return
 
     ## Config ##
@@ -443,6 +468,11 @@ def generate_clips_preview():
 
     segments = get_clips_segments()
     if segments is None:
+        return
+
+    segments = filtrar_segments_por_flag(segments, "preview")
+    if not segments:
+        messagebox.showinfo("Aviso", "Nenhum capítulo marcado para gerar preview.")
         return
 
     #Formata para exibir apenas o dia (DD/MM/AAAA) e o horário (HH:MM)

@@ -644,18 +644,40 @@ def carregar_capitulos():
 tela = tk.Tk()
 print(font.families())
 tela.title("Crie cortes com base nas timestamps!")
-tela.geometry("900x920")
+tela.geometry("900x800")
 tela.configure(bg="#7F14B7")
 
-lbl_instrucao = tk.Label(tela, text="Cole as timestamps aqui:", bg="#7F14B7", fg="#FEF500", font=("Industry-Black", 12, "bold"))
+# Container rolável pra toda a interface — sem isso, qualquer seção nova
+# empurra a de baixo pra fora da janela e ela some sem aviso nenhum.
+canvas_principal = tk.Canvas(tela, bg="#7F14B7", highlightthickness=0)
+scrollbar_principal = tk.Scrollbar(tela, orient="vertical", command=canvas_principal.yview)
+frame_conteudo = tk.Frame(canvas_principal, bg="#7F14B7")
+
+frame_conteudo.bind(
+    "<Configure>",
+    lambda e: canvas_principal.configure(scrollregion=canvas_principal.bbox("all"))
+)
+
+canvas_principal.create_window((0, 0), window=frame_conteudo, anchor="nw")
+canvas_principal.configure(yscrollcommand=scrollbar_principal.set)
+
+canvas_principal.pack(side="left", fill="both", expand=True)
+scrollbar_principal.pack(side="right", fill="y")
+
+def _rolar_com_mouse(event):
+    canvas_principal.yview_scroll(int(-1 * (event.delta / 120)), "units")
+
+canvas_principal.bind_all("<MouseWheel>", _rolar_com_mouse)
+
+lbl_instrucao = tk.Label(frame_conteudo, text="Cole as timestamps aqui:", bg="#7F14B7", fg="#FEF500", font=("Industry-Black", 12, "bold"))
 lbl_instrucao.pack(pady=10)
 
 # Campo de texto para entrada de timestamps
-txt_entrada = scrolledtext.ScrolledText(tela, width=80, height=14, bg="#FFFFFF", fg="#000000")
+txt_entrada = scrolledtext.ScrolledText(frame_conteudo, width=80, height=14, bg="#FFFFFF", fg="#000000")
 txt_entrada.pack(pady=5)
 
 # Frame para o link do YouTube (opcional - se preenchido, baixa via yt-dlp em vez de pedir arquivo local)
-frame_youtube = tk.Frame(tela, bg="#7F14B7")
+frame_youtube = tk.Frame(frame_conteudo, bg="#7F14B7")
 frame_youtube.pack(pady=8)
 
 lbl_youtube = tk.Label(
@@ -674,7 +696,7 @@ entry_youtube.pack(side="left", padx=5)
 # Vídeo já resolvido (baixado ou selecionado), reaproveitado pelos cortes e previews
 video_path_var = tk.StringVar()
 
-frame_video = tk.Frame(tela, bg="#7F14B7")
+frame_video = tk.Frame(frame_conteudo, bg="#7F14B7")
 frame_video.pack(pady=5)
 
 btn_resolver_video = tk.Button(
@@ -701,7 +723,7 @@ lbl_video_resolvido.pack(side="left", padx=5)
 ultima_pasta_preview_var = tk.StringVar()
 
 lbl_capitulos = tk.Label(
-    tela,
+    frame_conteudo,
     text="Capítulos (marque o que quer gerar):",
     bg="#7F14B7",
     fg="#FEF500",
@@ -710,7 +732,7 @@ lbl_capitulos = tk.Label(
 lbl_capitulos.pack(pady=(10, 2))
 
 btn_carregar_capitulos = tk.Button(
-    tela,
+    frame_conteudo,
     text="Carregar capítulos",
     command=carregar_capitulos,
     bg="#FEF500",
@@ -720,7 +742,7 @@ btn_carregar_capitulos = tk.Button(
 btn_carregar_capitulos.pack(pady=2)
 
 # Lista rolável de capítulos com checkboxes de corte/preview
-frame_capitulos_container = tk.Frame(tela, bg="#7F14B7")
+frame_capitulos_container = tk.Frame(frame_conteudo, bg="#7F14B7")
 frame_capitulos_container.pack(pady=5, padx=20, fill="x")
 
 canvas_capitulos = tk.Canvas(frame_capitulos_container, bg="#FFFFFF", height=180, highlightthickness=0)
@@ -739,7 +761,7 @@ canvas_capitulos.pack(side="left", fill="both", expand=True)
 scrollbar_capitulos.pack(side="right", fill="y")
 
 # Frame para agrupar os botões lado a lado
-frame_botoes = tk.Frame(tela, bg="#7F14B7")
+frame_botoes = tk.Frame(frame_conteudo, bg="#7F14B7")
 frame_botoes.pack(pady=20) # Empacota o container verticalmente
 
 btn_criar_cortes = tk.Button(frame_botoes, text="Criar cortes", command=generate_clips, bg="#FEF500", fg="#7F14B7", font=("Industry-Black", 10, "bold"))
@@ -749,24 +771,24 @@ btn_criar_previews = tk.Button(frame_botoes, text="Criar preview de cortes", com
 btn_criar_previews.pack(side="left", padx=15)
 
 
-lbl_saida = tk.Label(tela, text="Progresso:", bg="#7F14B7", fg="#FEF500", font=("Industry-Black", 12, "bold"))
+lbl_saida = tk.Label(frame_conteudo, text="Progresso:", bg="#7F14B7", fg="#FEF500", font=("Industry-Black", 12, "bold"))
 lbl_saida.pack(pady=10)
 
-txt_saida = scrolledtext.ScrolledText(tela, width=80, height=10, bg="#FFFFFF", fg="#000000")
+txt_saida = scrolledtext.ScrolledText(frame_conteudo, width=80, height=10, bg="#FFFFFF", fg="#000000")
 txt_saida.pack(pady=5)
 
-progress = Progressbar(tela, orient="horizontal", length=200, maximum=100)
+progress = Progressbar(frame_conteudo, orient="horizontal", length=200, maximum=100)
 progress.pack(pady=15)
 
 
 # Frame das opções
-frame_opcoes = tk.Frame(tela, bg="#7F14B7")
+frame_opcoes = tk.Frame(frame_conteudo, bg="#7F14B7")
 frame_opcoes.pack(pady=10)
 
-frame_endslate = tk.Frame(tela, bg="#7F14B7")
+frame_endslate = tk.Frame(frame_conteudo, bg="#7F14B7")
 frame_endslate.pack(pady=5)
 
-frame_logo = tk.Frame(tela, bg="#7F14B7")
+frame_logo = tk.Frame(frame_conteudo, bg="#7F14B7")
 frame_logo.pack(pady=10)
 
 # Vars

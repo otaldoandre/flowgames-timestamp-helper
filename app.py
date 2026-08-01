@@ -216,7 +216,8 @@ def generate_clips():
     date = datetime.now().strftime("%d/%m/%Y %H:%M")
     date = get_clean_title(date)
 
-    os.mkdir(f"cortes - {date}")
+    pasta_original = os.getcwd()
+    os.makedirs(f"cortes - {date}", exist_ok=True)
     os.chdir(f"./cortes - {date}")
 
     ## Processamento dos segmentos ##
@@ -406,6 +407,8 @@ def generate_clips():
         os.system(cmd)
         print(cmd)
 
+    os.chdir(pasta_original)
+
 
 def generate_clips_preview():
     # A função assume que o usuário informou o link do YouTube (baixa via yt-dlp)
@@ -422,7 +425,9 @@ def generate_clips_preview():
     date = datetime.now().strftime("%d/%m/%Y %H:%M")
     date = get_clean_title(date)
 
-    os.mkdir(f"preview - {date}")
+    pasta_original = os.getcwd()
+    pasta_preview_atual = os.path.join(pasta_original, f"preview - {date}")
+    os.makedirs(f"preview - {date}", exist_ok=True)
     os.chdir(f"./preview - {date}")
 
     total_segments = len(segments)
@@ -486,6 +491,8 @@ def generate_clips_preview():
             cmd = cmd_start_preview
 
         os.system(cmd)
+
+    os.chdir(pasta_original)
 
 def select_endslate():
 

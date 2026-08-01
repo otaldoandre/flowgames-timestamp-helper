@@ -140,11 +140,12 @@ def download_youtube_video(url, output_dir):
     return filepath
 
 
-def get_video_source():
+def resolver_video():
     """
-    Retorna o caminho do vídeo a ser cortado.
-    Se houver um link no campo de YouTube, baixa o vídeo via yt-dlp.
-    Caso contrário, abre o diálogo de seleção de arquivo local (comportamento original).
+    Botão único: baixa o vídeo do YouTube (se houver link) ou abre o diálogo
+    de seleção de arquivo local, e guarda o resultado em video_path_var —
+    tanto "Criar cortes" quanto "Criar preview" reaproveitam esse mesmo
+    vídeo em vez de baixar/selecionar de novo a cada ação.
     """
     youtube_url = youtube_link_var.get().strip()
 
@@ -156,26 +157,46 @@ def get_video_source():
                 "Instale com: pip install yt-dlp\n"
                 "(e garanta que esteja no PATH)."
             )
-            return None
+            return
 
         download_dir = filedialog.askdirectory(
             title="Selecione a pasta onde o vídeo baixado será salvo"
         )
         if not download_dir:
             messagebox.showerror("Erro", "Nenhuma pasta selecionada! Tente novamente.")
-            return None
+            return
 
-        return download_youtube_video(youtube_url, download_dir)
+        filepath = download_youtube_video(youtube_url, download_dir)
+        if filepath:
+            video_path_var.set(filepath)
 
     else:
         path = filedialog.askopenfilename(
             title="Selecione a live full",
             filetypes=[("MP4 files", "*.mp4")]
         )
-        if not path:
-            messagebox.showerror("Erro", "O arquivo não foi selecionado! Tente novamente.")
-            return None
-        return path
+        if path:
+            video_path_var.set(path)
+
+
+def get_video_source():
+    """
+    Retorna o vídeo já resolvido (baixado ou selecionado via o botão
+    "Baixar / Selecionar vídeo"). Se ainda não tiver sido resolvido nessa
+    sessão, aciona resolver_video() uma vez antes de seguir.
+    """
+    if not video_path_var.get():
+        resolver_video()
+
+    path = video_path_var.get()
+    if not path:
+        messagebox.showerror(
+            "Erro",
+            "Nenhum vídeo baixado ou selecionado! Use o botão \"Baixar / Selecionar vídeo\"."
+        )
+        return None
+
+    return path
 
 
 def generate_clips():
@@ -538,6 +559,32 @@ lbl_youtube.pack(side="left", padx=5)
 youtube_link_var = tk.StringVar()
 entry_youtube = tk.Entry(frame_youtube, textvariable=youtube_link_var, width=45, bg="#FFFFFF", fg="#000000")
 entry_youtube.pack(side="left", padx=5)
+
+# Vídeo já resolvido (baixado ou selecionado), reaproveitado pelos cortes e previews
+video_path_var = tk.StringVar()
+
+frame_video = tk.Frame(tela, bg="#7F14B7")
+frame_video.pack(pady=5)
+
+btn_resolver_video = tk.Button(
+    frame_video,
+    text="Baixar / Selecionar vídeo",
+    command=resolver_video,
+    bg="#FEF500",
+    fg="#7F14B7",
+    font=("Industry-Black", 10, "bold")
+)
+btn_resolver_video.pack(side="left", padx=5)
+
+lbl_video_resolvido = tk.Label(
+    frame_video,
+    textvariable=video_path_var,
+    bg="#7F14B7",
+    fg="#FFFFFF",
+    wraplength=500,
+    justify="left"
+)
+lbl_video_resolvido.pack(side="left", padx=5)
 
 # Frame para agrupar os botões lado a lado
 frame_botoes = tk.Frame(tela, bg="#7F14B7")

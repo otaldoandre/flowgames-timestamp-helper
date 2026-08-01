@@ -600,11 +600,30 @@ def carregar_capitulos():
     if segments is None:
         return
 
+    # Guarda o que já estava marcado/desmarcado antes de recarregar, pra uma
+    # pequena edição no texto não jogar fora a seleção que você já tinha feito.
+    # Casa primeiro pelo título completo (com o número do capítulo); se não
+    # achar (porque a posição mudou), tenta casar só pelo texto do título.
+    estado_por_titulo = {
+        title: (info["corte"].get(), info["preview"].get())
+        for title, info in capitulos_vars.items()
+    }
+    estado_por_texto = {
+        title.split("-", 1)[1] if "-" in title else title: valores
+        for title, valores in estado_por_titulo.items()
+    }
+
     for widget in frame_capitulos.winfo_children():
         widget.destroy()
     capitulos_vars.clear()
 
     for seg in segments:
+        texto_sem_numero = seg["title"].split("-", 1)[1] if "-" in seg["title"] else seg["title"]
+        corte_anterior, preview_anterior = estado_por_titulo.get(
+            seg["title"],
+            estado_por_texto.get(texto_sem_numero, (True, True))
+        )
+
         row = tk.Frame(frame_capitulos, bg="#FFFFFF")
         row.pack(fill="x", pady=2, padx=4)
 
@@ -616,11 +635,11 @@ def carregar_capitulos():
         )
         lbl.pack(side="left")
 
-        var_corte = tk.BooleanVar(value=True)
+        var_corte = tk.BooleanVar(value=corte_anterior)
         chk_corte = tk.Checkbutton(row, text="Corte", variable=var_corte, bg="#FFFFFF")
         chk_corte.pack(side="left", padx=4)
 
-        var_preview = tk.BooleanVar(value=True)
+        var_preview = tk.BooleanVar(value=preview_anterior)
         chk_preview = tk.Checkbutton(row, text="Preview", variable=var_preview, bg="#FFFFFF")
         chk_preview.pack(side="left", padx=4)
 

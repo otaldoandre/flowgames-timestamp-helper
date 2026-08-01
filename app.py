@@ -9,6 +9,9 @@ import os
 import subprocess
 import shutil
 
+# Logo padrão do canal Cortes do Flow Games — ajuste esse caminho uma única vez
+LOGO_PADRAO_PATH = r"C:\caminho\para\logo_cortes_flow_games.png"
+
 def get_clean_title(title):
     #Remove acentos
     title = unicodedata.normalize("NFD", title)
@@ -572,8 +575,8 @@ fade_in_var = tk.BooleanVar()
 fade_out_var = tk.BooleanVar()
 endslate_var = tk.BooleanVar()
 endslate_path_var = tk.StringVar()
-logo_var = tk.BooleanVar()
-logo_path_var = tk.StringVar()
+logo_var = tk.BooleanVar(value=True)
+logo_path_var = tk.StringVar(value=LOGO_PADRAO_PATH)
 
 check_fade_in = tk.Checkbutton(
     frame_opcoes,

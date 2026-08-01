@@ -547,6 +547,7 @@ def generate_clips_preview():
         os.system(cmd)
 
     os.chdir(pasta_original)
+    ultima_pasta_preview_var.set(pasta_preview_atual)
 
 def select_endslate():
 
@@ -559,11 +560,91 @@ def select_endslate():
         endslate_path_var.set(file_path)
 
 
+def abrir_preview_capitulo(title):
+    """
+    Abre os arquivos de preview (início/fim) desse capítulo no player padrão
+    do Windows (os.startfile). Só funciona depois de rodar "Criar preview de
+    cortes" pelo menos uma vez na sessão atual.
+    """
+    pasta = ultima_pasta_preview_var.get()
+    if not pasta:
+        messagebox.showinfo(
+            "Preview",
+            "Gere os previews primeiro, com o botão \"Criar preview de cortes\"."
+        )
+        return
+
+    caminho_start = os.path.join(pasta, f"{title}_preview_start.mp4")
+    caminho_end = os.path.join(pasta, f"{title}_preview_end.mp4")
+
+    abriu_algum = False
+    if os.path.exists(caminho_start):
+        os.startfile(caminho_start)
+        abriu_algum = True
+    if os.path.exists(caminho_end):
+        os.startfile(caminho_end)
+        abriu_algum = True
+
+    if not abriu_algum:
+        messagebox.showinfo("Preview", "O preview desse capítulo ainda não foi gerado.")
+
+
+def carregar_capitulos():
+    """
+    Lê as timestamps coladas em txt_entrada e monta, pra cada capítulo, uma
+    linha com checkboxes de "gerar corte" / "gerar preview" e um botão pra
+    abrir o preview já gerado. generate_clips()/generate_clips_preview()
+    passam a respeitar essas checkboxes via filtrar_segments_por_flag().
+    """
+    segments = get_clips_segments()
+    if segments is None:
+        return
+
+    for widget in frame_capitulos.winfo_children():
+        widget.destroy()
+    capitulos_vars.clear()
+
+    for seg in segments:
+        row = tk.Frame(frame_capitulos, bg="#FFFFFF")
+        row.pack(fill="x", pady=2, padx=4)
+
+        fim = seg["end"] if seg["end"] else "fim do vídeo"
+        texto_linha = f'{seg["start"]} → {fim}  |  {seg["title"]}'
+        lbl = tk.Label(
+            row, text=texto_linha, bg="#FFFFFF", fg="#000000",
+            anchor="w", width=48, font=("Industry-Black", 9)
+        )
+        lbl.pack(side="left")
+
+        var_corte = tk.BooleanVar(value=True)
+        chk_corte = tk.Checkbutton(row, text="Corte", variable=var_corte, bg="#FFFFFF")
+        chk_corte.pack(side="left", padx=4)
+
+        var_preview = tk.BooleanVar(value=True)
+        chk_preview = tk.Checkbutton(row, text="Preview", variable=var_preview, bg="#FFFFFF")
+        chk_preview.pack(side="left", padx=4)
+
+        btn_abrir = tk.Button(
+            row,
+            text="Abrir preview",
+            command=lambda t=seg["title"]: abrir_preview_capitulo(t),
+            bg="#FEF500",
+            fg="#7F14B7",
+            font=("Industry-Black", 8, "bold")
+        )
+        btn_abrir.pack(side="left", padx=4)
+
+        capitulos_vars[seg["title"]] = {"corte": var_corte, "preview": var_preview, "seg": seg}
+
+    txt_saida.insert(tk.END, f"{len(segments)} capítulos carregados.\n")
+    txt_saida.see(tk.END)
+
+
 # Configuração da interface
 tela = tk.Tk()
 print(font.families())
 tela.title("Crie cortes com base nas timestamps!")
-tela.geometry("900x760")
+tela.geometry("900x920")
 tela.configure(bg="#7F14B7")
 
 lbl_instrucao = tk.Label(tela, text="Cole as timestamps aqui:", bg="#7F14B7", fg="#FEF500", font=("Industry-Black", 12, "bold"))
@@ -615,6 +696,47 @@ lbl_video_resolvido = tk.Label(
     justify="left"
 )
 lbl_video_resolvido.pack(side="left", padx=5)
+
+# Guarda a pasta do último preview gerado, pra dar pra abrir os arquivos depois
+ultima_pasta_preview_var = tk.StringVar()
+
+lbl_capitulos = tk.Label(
+    tela,
+    text="Capítulos (marque o que quer gerar):",
+    bg="#7F14B7",
+    fg="#FEF500",
+    font=("Industry-Black", 11, "bold")
+)
+lbl_capitulos.pack(pady=(10, 2))
+
+btn_carregar_capitulos = tk.Button(
+    tela,
+    text="Carregar capítulos",
+    command=carregar_capitulos,
+    bg="#FEF500",
+    fg="#7F14B7",
+    font=("Industry-Black", 10, "bold")
+)
+btn_carregar_capitulos.pack(pady=2)
+
+# Lista rolável de capítulos com checkboxes de corte/preview
+frame_capitulos_container = tk.Frame(tela, bg="#7F14B7")
+frame_capitulos_container.pack(pady=5, padx=20, fill="x")
+
+canvas_capitulos = tk.Canvas(frame_capitulos_container, bg="#FFFFFF", height=180, highlightthickness=0)
+scrollbar_capitulos = tk.Scrollbar(frame_capitulos_container, orient="vertical", command=canvas_capitulos.yview)
+frame_capitulos = tk.Frame(canvas_capitulos, bg="#FFFFFF")
+
+frame_capitulos.bind(
+    "<Configure>",
+    lambda e: canvas_capitulos.configure(scrollregion=canvas_capitulos.bbox("all"))
+)
+
+canvas_capitulos.create_window((0, 0), window=frame_capitulos, anchor="nw")
+canvas_capitulos.configure(yscrollcommand=scrollbar_capitulos.set)
+
+canvas_capitulos.pack(side="left", fill="both", expand=True)
+scrollbar_capitulos.pack(side="right", fill="y")
 
 # Frame para agrupar os botões lado a lado
 frame_botoes = tk.Frame(tela, bg="#7F14B7")

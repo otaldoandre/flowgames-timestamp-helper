@@ -560,11 +560,12 @@ def select_endslate():
         endslate_path_var.set(file_path)
 
 
-def abrir_preview_capitulo(title):
+def abrir_preview_capitulo(title, parte):
     """
-    Abre os arquivos de preview (início/fim) desse capítulo no player padrão
-    do Windows (os.startfile). Só funciona depois de rodar "Criar preview de
-    cortes" pelo menos uma vez na sessão atual.
+    Abre o arquivo de preview de uma parte específica desse capítulo
+    ("start" ou "end") no player padrão do Windows (os.startfile). Só
+    funciona depois de rodar "Criar preview de cortes" pelo menos uma vez
+    na sessão atual.
     """
     pasta = ultima_pasta_preview_var.get()
     if not pasta:
@@ -574,18 +575,10 @@ def abrir_preview_capitulo(title):
         )
         return
 
-    caminho_start = os.path.join(pasta, f"{title}_preview_start.mp4")
-    caminho_end = os.path.join(pasta, f"{title}_preview_end.mp4")
-
-    abriu_algum = False
-    if os.path.exists(caminho_start):
-        os.startfile(caminho_start)
-        abriu_algum = True
-    if os.path.exists(caminho_end):
-        os.startfile(caminho_end)
-        abriu_algum = True
-
-    if not abriu_algum:
+    caminho = os.path.join(pasta, f"{title}_preview_{parte}.mp4")
+    if os.path.exists(caminho):
+        os.startfile(caminho)
+    else:
         messagebox.showinfo("Preview", "O preview desse capítulo ainda não foi gerado.")
 
 
@@ -643,15 +636,29 @@ def carregar_capitulos():
         chk_preview = tk.Checkbutton(row, text="Preview", variable=var_preview, bg="#FFFFFF")
         chk_preview.pack(side="left", padx=4)
 
-        btn_abrir = tk.Button(
+        btn_abrir_inicio = tk.Button(
             row,
-            text="Abrir preview",
-            command=lambda t=seg["title"]: abrir_preview_capitulo(t),
+            text="▶ Início",
+            command=lambda t=seg["title"]: abrir_preview_capitulo(t, "start"),
             bg="#FEF500",
             fg="#7F14B7",
             font=("Industry-Black", 8, "bold")
         )
-        btn_abrir.pack(side="left", padx=4)
+        btn_abrir_inicio.pack(side="left", padx=2)
+
+        # O preview de "fim" só é gerado quando o capítulo tem um próximo
+        # timestamp (não é o último da lista) — então nem mostra o botão
+        # quando ele nunca vai existir.
+        if seg["end"]:
+            btn_abrir_fim = tk.Button(
+                row,
+                text="▶ Fim",
+                command=lambda t=seg["title"]: abrir_preview_capitulo(t, "end"),
+                bg="#FEF500",
+                fg="#7F14B7",
+                font=("Industry-Black", 8, "bold")
+            )
+            btn_abrir_fim.pack(side="left", padx=2)
 
         capitulos_vars[seg["title"]] = {"corte": var_corte, "preview": var_preview, "seg": seg}
 

@@ -672,6 +672,76 @@ def carregar_capitulos():
     txt_saida.see(tk.END)
 
 
+def gerar_capitulos_automaticamente():
+    """
+    Analisa a transcrição de um episódio novo, detecta automaticamente
+    onde os capítulos começam, e usa IA pra gerar um título/descrição
+    pra cada um — preenche a caixa de timestamps sozinho, como
+    alternativa a colar manualmente. Depois é só clicar em "Carregar
+    capítulos" normal, igual sempre já fazia.
+    """
+    caminho_transcricao = filedialog.askopenfilename(
+        title="Selecione a transcrição do episódio",
+        filetypes=[("Arquivos de texto", "*.txt")]
+    )
+    if not caminho_transcricao:
+        return
+
+    txt_saida.insert(tk.END, "Detectando capítulos automaticamente...\n")
+    txt_saida.see(tk.END)
+    tela.update_idletasks()
+
+    blocos = carregar_transcricao_ia(caminho_transcricao)
+    fronteiras = sorted(detectar_capitulos(caminho_transcricao))
+
+    if not fronteiras:
+        messagebox.showinfo("Aviso", "Nenhum capítulo detectado nessa transcrição.")
+        return
+
+    fim_transcricao = max((b["seconds"] for b in blocos), default=0) + 1
+
+    txt_saida.insert(tk.END, f"{len(fronteiras)} capítulos detectados. Gerando título com IA...\n")
+    txt_saida.see(tk.END)
+    tela.update_idletasks()
+
+    treino = carregar_json(CAMINHO_TREINO_IA)
+    exemplos = selecionar_exemplos_few_shot(treino)
+
+    metadata_ia.clear()
+    linhas_timestamp = []
+
+    for i, inicio in enumerate(fronteiras):
+        fim = fronteiras[i + 1] if i + 1 < len(fronteiras) else fim_transcricao
+        texto = " ".join(b["text"] for b in blocos if inicio <= b["seconds"] < fim)
+
+        h, resto = divmod(int(inicio), 3600)
+        m, s = divmod(resto, 60)
+        timestamp_str = f"{h:02d}:{m:02d}:{s:02d}"
+
+        titulo = "Sem titulo"
+        if texto.strip():
+            avaliacao = avaliar_capitulo({"texto": texto}, exemplos)
+            if avaliacao and avaliacao.get("titulo"):
+                titulo = avaliacao["titulo"]
+                chave_metadata = f"{i + 1}-" + get_clean_title(titulo)
+                metadata_ia[chave_metadata] = avaliacao
+
+        linhas_timestamp.append(f"{timestamp_str} - {titulo}")
+
+        txt_saida.insert(tk.END, f"  [{i + 1}/{len(fronteiras)}] {timestamp_str} - {titulo}\n")
+        txt_saida.see(tk.END)
+        tela.update_idletasks()
+
+    txt_entrada.delete("1.0", tk.END)
+    txt_entrada.insert("1.0", "\n".join(linhas_timestamp))
+
+    txt_saida.insert(
+        tk.END,
+        "\nCapítulos gerados! Clique em \"Carregar capítulos\" pra montar a lista de corte/preview.\n"
+    )
+    txt_saida.see(tk.END)
+
+
 # Configuração da interface
 tela = tk.Tk()
 print(font.families())

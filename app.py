@@ -9,12 +9,18 @@ import os
 import subprocess
 import shutil
 
-# Logo padrão do canal Cortes do Flow Games — ajuste esse caminho uma única vez
-LOGO_PADRAO_PATH = r"C:\caminho\para\logo_cortes_flow_games.png"
+from detectar_capitulos import detectar_capitulos, carregar_transcricao as carregar_transcricao_ia
+from gerar_metadata_capitulo import carregar_json, selecionar_exemplos_few_shot, avaliar_capitulo
 
-# Populado por carregar_capitulos(); guarda, por capítulo, se ele deve gerar
-# corte e/ou preview, além do segmento original (start/end/title)
+LOGO_PADRAO_PATH = r"C:\Users\andre\Downloads\TEMPLATE\TEMPLATE\logo.png"
+
+# Caminho do dataset de treino para referência de metadados
+CAMINHO_TREINO_IA = r"C:\Users\andre\Downloads\projetos\flowgames-timestamp-helper\scripts\dados_cortes_flow_games\fase2_treino.json"
 capitulos_vars = {}
+
+# Armazena os resultados de metadados gerados (score, quotes, textos de
+# thumbnail) indexados por título de capítulo para referência futura
+metadata_ia = {}
 
 def get_clean_title(title):
     #Remove acentos

@@ -15,13 +15,16 @@ from pipeline_thumbnail import montar_thumbnail_completa
 
 LOGO_PADRAO_PATH = r"C:\Users\andre\Downloads\TEMPLATE\TEMPLATE\logo.png"
 
+# Caminho do dataset de treino para referência de metadados
 CAMINHO_TREINO_IA = r"C:\Users\andre\Downloads\projetos\flowgames-timestamp-helper\scripts\dados_cortes_flow_games\fase2_treino.json"
 
-CAMINHO_TEMPLATE_THUMBNAIL = r"C:\Users\andre\Downloads\projetos\flowgames-timestamp-helper\thumb_corte_template.psd"
-PASTA_SAIDA_THUMBNAILS =  r"C:\Users\andre\Downloads\projetos\flowgames-timestamp-helper\thumbnails"
+# Template de thumbnail e pasta de saída — ajusta esses dois caminhos
+CAMINHO_TEMPLATE_THUMBNAIL = r"C:\caminho\para\thumb_corte_template.psd"
+PASTA_SAIDA_THUMBNAILS = r"C:\caminho\para\pasta_thumbnails"
 
 # Detecção automática de lado (esquerda/direita do host) ainda não é
-# confiável nos frames reais
+# confiável nos frames reais — força um lado fixo aqui até isso
+# melhorar. Ajusta manualmente se um corte específico precisar do outro.
 LADO_THUMBNAIL_PADRAO = "direita"
 
 capitulos_vars = {}
@@ -596,13 +599,71 @@ def abrir_preview_capitulo(title, parte):
         messagebox.showinfo("Preview", "O preview desse capítulo ainda não foi gerado.")
 
 
+def obter_metadata_ia_do_capitulo(title, seg):
+    """
+    Devolve o metadata da IA (quote, texto de thumbnail, título) pra
+    esse capítulo. Se já tiver sido gerado (via "Gerar capítulos
+    automaticamente"), usa o que já tá guardado. Senão, pergunta a
+    transcrição e gera na hora — assim funciona mesmo quando os
+    timestamps foram colados manualmente.
+    """
+    dados_ia = metadata_ia.get(title)
+    if dados_ia is not None:
+        return dados_ia
+
+    gerar_agora = messagebox.askyesno(
+        "Sugestão de texto pela IA",
+        f"Esse capítulo (\"{title}\") ainda não tem sugestão de texto da IA.\n\n"
+        "Quer selecionar a transcrição do episódio pra gerar agora?"
+    )
+    if not gerar_agora:
+        return {}
+
+    caminho_transcricao = filedialog.askopenfilename(
+        title="Selecione a transcrição do episódio",
+        filetypes=[("Arquivos de texto", "*.txt")]
+    )
+    if not caminho_transcricao:
+        return {}
+
+    blocos = carregar_transcricao_ia(caminho_transcricao)
+
+    inicio_dt = datetime.strptime(seg["start"], "%H:%M:%S")
+    inicio_segundos = inicio_dt.hour * 3600 + inicio_dt.minute * 60 + inicio_dt.second
+
+    if seg["end"]:
+        fim_dt = datetime.strptime(seg["end"], "%H:%M:%S")
+        fim_segundos = fim_dt.hour * 3600 + fim_dt.minute * 60 + fim_dt.second
+    else:
+        fim_segundos = max((b["seconds"] for b in blocos), default=inicio_segundos) + 1
+
+    texto = " ".join(b["text"] for b in blocos if inicio_segundos <= b["seconds"] < fim_segundos)
+    if not texto.strip():
+        messagebox.showinfo("Aviso", "Não achei texto da transcrição nesse intervalo de tempo.")
+        return {}
+
+    txt_saida.insert(tk.END, f"Gerando sugestão de texto com IA pra \"{title}\"...\n")
+    txt_saida.see(tk.END)
+    tela.update_idletasks()
+
+    treino = carregar_json(CAMINHO_TREINO_IA)
+    exemplos = selecionar_exemplos_few_shot(treino)
+    dados_ia = avaliar_capitulo({"texto": texto}, exemplos)
+
+    if dados_ia:
+        metadata_ia[title] = dados_ia
+        return dados_ia
+
+    return {}
+
+
 def gerar_thumbnail_para_capitulo(title, seg):
     """
     Gera a thumbnail completa (fundo removido do host, layout, texto,
     .psd editável) pra UM capítulo específico do checklist. Reaproveita
     o vídeo já resolvido, extrai um frame do host alguns segundos
     depois do início do corte, e pede a imagem sugerida (isso continua
-    escolha manual, não dá pra confiar busca automática de
+    escolha manual sua — não dá pra confiar busca automática de
     imagem).
 
     Se esse capítulo tiver metadata gerado pela IA (veio de "Gerar
@@ -620,7 +681,7 @@ def gerar_thumbnail_para_capitulo(title, seg):
     if not caminho_imagem_sugerida:
         return
 
-    dados_ia = metadata_ia.get(title, {})
+    dados_ia = obter_metadata_ia_do_capitulo(title, seg)
     texto_thumb = dados_ia.get("texto_thumbnail") or {}
     linha1 = texto_thumb.get("linha1") or dados_ia.get("titulo") or title
     linha2 = texto_thumb.get("linha2") or ""

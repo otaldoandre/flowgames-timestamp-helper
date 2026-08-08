@@ -831,22 +831,35 @@ ultima_pasta_preview_var = tk.StringVar()
 
 lbl_capitulos = tk.Label(
     frame_conteudo,
-    text="Capítulos (marque o que quer gerar):",
+    text="Capítulos — cole manualmente acima OU gera automático, depois marque o que quer gerar:",
     bg="#7F14B7",
     fg="#FEF500",
     font=("Industry-Black", 11, "bold")
 )
 lbl_capitulos.pack(pady=(10, 2))
 
+frame_botoes_capitulos = tk.Frame(frame_conteudo, bg="#7F14B7")
+frame_botoes_capitulos.pack(pady=2)
+
 btn_carregar_capitulos = tk.Button(
-    frame_conteudo,
+    frame_botoes_capitulos,
     text="Carregar capítulos",
     command=carregar_capitulos,
     bg="#FEF500",
     fg="#7F14B7",
     font=("Industry-Black", 10, "bold")
 )
-btn_carregar_capitulos.pack(pady=2)
+btn_carregar_capitulos.pack(side="left", padx=5)
+
+btn_gerar_automatico = tk.Button(
+    frame_botoes_capitulos,
+    text="Gerar capítulos automaticamente (IA)",
+    command=gerar_capitulos_automaticamente,
+    bg="#FEF500",
+    fg="#7F14B7",
+    font=("Industry-Black", 10, "bold")
+)
+btn_gerar_automatico.pack(side="left", padx=5)
 
 # Lista rolável de capítulos com checkboxes de corte/preview
 frame_capitulos_container = tk.Frame(frame_conteudo, bg="#7F14B7")

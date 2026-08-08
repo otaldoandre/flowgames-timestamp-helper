@@ -11,11 +11,19 @@ import shutil
 
 from detectar_capitulos import detectar_capitulos, carregar_transcricao as carregar_transcricao_ia
 from gerar_metadata_capitulo import carregar_json, selecionar_exemplos_few_shot, avaliar_capitulo
+from pipeline_thumbnail import montar_thumbnail_completa
 
 LOGO_PADRAO_PATH = r"C:\Users\andre\Downloads\TEMPLATE\TEMPLATE\logo.png"
 
-# Caminho do dataset de treino para referência de metadados
 CAMINHO_TREINO_IA = r"C:\Users\andre\Downloads\projetos\flowgames-timestamp-helper\scripts\dados_cortes_flow_games\fase2_treino.json"
+
+CAMINHO_TEMPLATE_THUMBNAIL = r"C:\Users\andre\Downloads\projetos\flowgames-timestamp-helper\thumb_corte_template.psd"
+PASTA_SAIDA_THUMBNAILS =  r"C:\Users\andre\Downloads\projetos\flowgames-timestamp-helper\thumbnails"
+
+# Detecção automática de lado (esquerda/direita do host) ainda não é
+# confiável nos frames reais
+LADO_THUMBNAIL_PADRAO = "direita"
+
 capitulos_vars = {}
 
 # Armazena os resultados de metadados gerados (score, quotes, textos de
@@ -588,6 +596,74 @@ def abrir_preview_capitulo(title, parte):
         messagebox.showinfo("Preview", "O preview desse capítulo ainda não foi gerado.")
 
 
+def gerar_thumbnail_para_capitulo(title, seg):
+    """
+    Gera a thumbnail completa (fundo removido do host, layout, texto,
+    .psd editável) pra UM capítulo específico do checklist. Reaproveita
+    o vídeo já resolvido, extrai um frame do host alguns segundos
+    depois do início do corte, e pede a imagem sugerida (isso continua
+    escolha manual, não dá pra confiar busca automática de
+    imagem).
+
+    Se esse capítulo tiver metadata gerado pela IA (veio de "Gerar
+    capítulos automaticamente"), usa o texto de thumbnail que ela já
+    sugeriu; senão, usa o próprio título como texto.
+    """
+    path = get_video_source()
+    if not path:
+        return
+
+    caminho_imagem_sugerida = filedialog.askopenfilename(
+        title=f"Selecione a imagem sugerida para \"{title}\"",
+        filetypes=[("Imagens", "*.jpg *.jpeg *.png")]
+    )
+    if not caminho_imagem_sugerida:
+        return
+
+    dados_ia = metadata_ia.get(title, {})
+    texto_thumb = dados_ia.get("texto_thumbnail") or {}
+    linha1 = texto_thumb.get("linha1") or dados_ia.get("titulo") or title
+    linha2 = texto_thumb.get("linha2") or ""
+
+    inicio_dt = datetime.strptime(seg["start"], "%H:%M:%S")
+    timestamp_frame = (inicio_dt + timedelta(seconds=5)).strftime("%H:%M:%S")
+
+    os.makedirs(PASTA_SAIDA_THUMBNAILS, exist_ok=True)
+    caminho_frame_bruto = os.path.join(PASTA_SAIDA_THUMBNAILS, f"{title}_frame_bruto.jpg")
+
+    txt_saida.insert(tk.END, f"Extraindo frame do host pra \"{title}\"...\n")
+    txt_saida.see(tk.END)
+    tela.update_idletasks()
+
+    cmd_frame = ["ffmpeg", "-y", "-ss", timestamp_frame, "-i", path, "-frames:v", "1", caminho_frame_bruto]
+    resultado_ffmpeg = subprocess.run(cmd_frame, capture_output=True, text=True)
+    if resultado_ffmpeg.returncode != 0:
+        messagebox.showerror("Erro", f"Falha ao extrair frame do vídeo:\n{resultado_ffmpeg.stderr[-300:]}")
+        return
+
+    txt_saida.insert(tk.END, f"Gerando thumbnail pra \"{title}\" (pode demorar, o Photoshop vai abrir)...\n")
+    txt_saida.see(tk.END)
+    tela.update_idletasks()
+
+    resultado_thumb = montar_thumbnail_completa(
+        CAMINHO_TEMPLATE_THUMBNAIL,
+        caminho_frame_bruto,
+        caminho_imagem_sugerida,
+        linha1,
+        linha2,
+        PASTA_SAIDA_THUMBNAILS,
+        title,
+        lado_forcado=LADO_THUMBNAIL_PADRAO,
+    )
+
+    if resultado_thumb:
+        txt_saida.insert(tk.END, f"Thumbnail pronta: {resultado_thumb}\n")
+        messagebox.showinfo("Thumbnail", f"Pronta! Revisa o .psd antes de publicar (posição/tamanho do host, sombra).")
+    else:
+        txt_saida.insert(tk.END, f"Falha ao gerar thumbnail de \"{title}\" — confere o log do Photoshop.\n")
+    txt_saida.see(tk.END)
+
+
 def carregar_capitulos():
     """
     Lê as timestamps coladas em txt_entrada e monta, pra cada capítulo, uma
@@ -665,6 +741,16 @@ def carregar_capitulos():
                 font=("Industry-Black", 8, "bold")
             )
             btn_abrir_fim.pack(side="left", padx=2)
+
+        btn_thumbnail = tk.Button(
+            row,
+            text="🖼 Thumbnail",
+            command=lambda t=seg["title"], s=seg: gerar_thumbnail_para_capitulo(t, s),
+            bg="#FEF500",
+            fg="#7F14B7",
+            font=("Industry-Black", 8, "bold")
+        )
+        btn_thumbnail.pack(side="left", padx=2)
 
         capitulos_vars[seg["title"]] = {"corte": var_corte, "preview": var_preview, "seg": seg}
 

@@ -7,3 +7,6 @@ preview - */
 thumbnails/
 
 .env
+
+_projetos.json
+estado.json

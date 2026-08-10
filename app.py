@@ -6,6 +6,7 @@ from tkinter.ttk import *
 import unicodedata
 import re
 import os
+import json
 import subprocess
 import shutil
 
@@ -49,8 +50,83 @@ blocos_transcricao_atual = None
 LOGO_POSICAO_X = None
 LOGO_POSICAO_Y = None
 
-
+# Pasta do projeto da live atual — None até o usuário definir via
+# "Criar Projeto". Cortes, previews e thumbnails passam a ir pra dentro
+# dela (subpastas cortes/, preview/, thumbnail/) em vez de pastas
+# soltas com data no nome. Fica None = comportamento antigo ainda
+# funciona (compatibilidade, não trava quem não configurar isso).
 PASTA_PROJETO_ATUAL = None
+
+# Registro de todos os projetos já criados (nome, pasta, última vez
+# aberto) — fica ao lado do app.py, não da pasta atual de trabalho, pra
+# sempre ser encontrado independente de onde o programa é executado.
+CAMINHO_REGISTRO_PROJETOS = os.path.join(os.path.dirname(os.path.abspath(__file__)), "_projetos.json")
+
+
+def carregar_registro_projetos():
+    if not os.path.exists(CAMINHO_REGISTRO_PROJETOS):
+        return []
+    try:
+        with open(CAMINHO_REGISTRO_PROJETOS, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except (json.JSONDecodeError, OSError):
+        return []
+
+
+def salvar_registro_projetos(projetos):
+    with open(CAMINHO_REGISTRO_PROJETOS, "w", encoding="utf-8") as f:
+        json.dump(projetos, f, ensure_ascii=False, indent=2)
+
+
+def registrar_projeto(nome, pasta):
+    """Adiciona (ou, se já existir, atualiza) um projeto no registro, marcando como o mais recente."""
+    projetos = carregar_registro_projetos()
+    agora = datetime.now().isoformat()
+
+    for p in projetos:
+        if p["pasta"] == pasta:
+            p["ultima_abertura"] = agora
+            salvar_registro_projetos(projetos)
+            return
+
+    projetos.append({"nome": nome, "pasta": pasta, "ultima_abertura": agora})
+    salvar_registro_projetos(projetos)
+
+
+def caminho_estado_projeto(pasta_projeto):
+    return os.path.join(pasta_projeto, "estado.json")
+
+
+def salvar_estado_projeto():
+    """Salva o texto de timestamps colado e o estado das checkboxes do projeto atual."""
+    if not PASTA_PROJETO_ATUAL:
+        return
+
+    estado_capitulos = {
+        title: {"corte": info["corte"].get(), "preview": info["preview"].get()}
+        for title, info in capitulos_vars.items()
+    }
+    estado = {
+        "texto_timestamps": txt_entrada.get("1.0", tk.END),
+        "capitulos": estado_capitulos,
+    }
+
+    try:
+        with open(caminho_estado_projeto(PASTA_PROJETO_ATUAL), "w", encoding="utf-8") as f:
+            json.dump(estado, f, ensure_ascii=False, indent=2)
+    except OSError:
+        pass  # falha ao salvar não deve travar o fluxo normal do programa
+
+
+def carregar_estado_projeto(pasta_projeto):
+    caminho = caminho_estado_projeto(pasta_projeto)
+    if not os.path.exists(caminho):
+        return None
+    try:
+        with open(caminho, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except (json.JSONDecodeError, OSError):
+        return None
 
 def get_clean_title(title):
     #Remove acentos
@@ -196,7 +272,7 @@ def download_youtube_video(url, output_dir):
     return filepath
 
 
-def selecionar_pasta_projeto():
+def criar_novo_projeto():
     """
     Pede o NOME do projeto da live (não uma pasta pra escolher) e cria
     a pasta com esse nome, na pasta atual — com a estrutura padrão já
@@ -206,7 +282,9 @@ def selecionar_pasta_projeto():
         <projeto>/thumbnail/            (os .psd finais ficam direto aqui)
         <projeto>/thumbnail/thumbs_feitas/   (os .png finais ficam aqui)
     Cortes, previews e thumbnails gerados depois disso passam a usar
-    essa estrutura em vez de pastas soltas com data no nome.
+    essa estrutura em vez de pastas soltas com data no nome. Registra
+    o projeto na lista, e limpa a tela pra começar do zero (um projeto
+    novo não carrega progresso de outro).
     """
     global PASTA_PROJETO_ATUAL
 
@@ -227,8 +305,82 @@ def selecionar_pasta_projeto():
     PASTA_PROJETO_ATUAL = pasta
     pasta_projeto_var.set(pasta)
 
+    registrar_projeto(nome_projeto, pasta)
+    atualizar_lista_projetos()
+    combo_projetos.set(nome_projeto)
+
+    # Projeto novo começa vazio — não herda o que estava em tela antes
+    txt_entrada.delete("1.0", tk.END)
+    for widget in frame_capitulos.winfo_children():
+        widget.destroy()
+    capitulos_vars.clear()
+    metadata_ia.clear()
+
     txt_saida.insert(tk.END, f"Projeto criado: {pasta}\n")
     txt_saida.see(tk.END)
+
+
+def abrir_projeto_selecionado():
+    """
+    Abre o projeto escolhido no menu suspenso — restaura o texto de
+    timestamps e o estado das checkboxes salvos da última vez (se
+    houver), continuando de onde parou.
+    """
+    global PASTA_PROJETO_ATUAL
+
+    nome_selecionado = combo_projetos.get()
+    if not nome_selecionado:
+        messagebox.showinfo("Aviso", "Escolhe um projeto na lista primeiro.")
+        return
+
+    projetos = carregar_registro_projetos()
+    projeto = next((p for p in projetos if p["nome"] == nome_selecionado), None)
+    if not projeto:
+        messagebox.showerror("Erro", "Esse projeto não foi encontrado no registro.")
+        return
+
+    pasta = projeto["pasta"]
+    if not os.path.isdir(pasta):
+        messagebox.showerror("Erro", f"A pasta desse projeto não existe mais:\n{pasta}")
+        return
+
+    PASTA_PROJETO_ATUAL = pasta
+    pasta_projeto_var.set(pasta)
+    registrar_projeto(nome_selecionado, pasta)  # marca como o mais recente
+    atualizar_lista_projetos()
+    combo_projetos.set(nome_selecionado)
+
+    metadata_ia.clear()
+    for widget in frame_capitulos.winfo_children():
+        widget.destroy()
+    capitulos_vars.clear()
+
+    estado = carregar_estado_projeto(pasta)
+    if estado:
+        txt_entrada.delete("1.0", tk.END)
+        txt_entrada.insert("1.0", estado.get("texto_timestamps", "").strip())
+
+        estado_capitulos = estado.get("capitulos", {})
+        estado_por_titulo = {
+            title: (info.get("corte", True), info.get("preview", True))
+            for title, info in estado_capitulos.items()
+        }
+        if estado_por_titulo:
+            carregar_capitulos(estado_inicial=estado_por_titulo)
+
+        txt_saida.insert(tk.END, f"Projeto '{nome_selecionado}' reaberto — progresso restaurado.\n")
+    else:
+        txt_entrada.delete("1.0", tk.END)
+        txt_saida.insert(tk.END, f"Projeto '{nome_selecionado}' aberto (ainda sem progresso salvo).\n")
+    txt_saida.see(tk.END)
+
+
+def atualizar_lista_projetos():
+    """Atualiza os itens do menu suspenso de projetos, do mais recente pro mais antigo."""
+    projetos = carregar_registro_projetos()
+    projetos_ordenados = sorted(projetos, key=lambda p: p["ultima_abertura"], reverse=True)
+    combo_projetos["values"] = [p["nome"] for p in projetos_ordenados]
+    return projetos_ordenados
 
 
 def resolver_video():
@@ -1222,12 +1374,16 @@ def gerar_thumbnail_para_capitulo(title, seg):
     txt_saida.see(tk.END)
 
 
-def carregar_capitulos():
+def carregar_capitulos(estado_inicial=None):
     """
     Lê as timestamps coladas em txt_entrada e monta, pra cada capítulo, uma
     linha com checkboxes de "gerar corte" / "gerar preview" e um botão pra
     abrir o preview já gerado. generate_clips()/generate_clips_preview()
     passam a respeitar essas checkboxes via filtrar_segments_por_flag().
+
+    Se estado_inicial for passado (dict título -> (corte, preview)), usa
+    ele em vez do estado atual das checkboxes em tela — é assim que um
+    projeto salvo restaura o progresso ao ser reaberto.
     """
     segments = get_clips_segments()
     if segments is None:
@@ -1237,10 +1393,13 @@ def carregar_capitulos():
     # pequena edição no texto não jogar fora a seleção que você já tinha feito.
     # Casa primeiro pelo título completo (com o número do capítulo); se não
     # achar (porque a posição mudou), tenta casar só pelo texto do título.
-    estado_por_titulo = {
-        title: (info["corte"].get(), info["preview"].get())
-        for title, info in capitulos_vars.items()
-    }
+    if estado_inicial is not None:
+        estado_por_titulo = estado_inicial
+    else:
+        estado_por_titulo = {
+            title: (info["corte"].get(), info["preview"].get())
+            for title, info in capitulos_vars.items()
+        }
     estado_por_texto = {
         title.split("-", 1)[1] if "-" in title else title: valores
         for title, valores in estado_por_titulo.items()
@@ -1269,10 +1428,12 @@ def carregar_capitulos():
         lbl.pack(side="left")
 
         var_corte = tk.BooleanVar(value=corte_anterior)
+        var_corte.trace_add("write", lambda *args: salvar_estado_projeto())
         chk_corte = tk.Checkbutton(row, text="Corte", variable=var_corte, bg="#FFFFFF")
         chk_corte.pack(side="left", padx=4)
 
         var_preview = tk.BooleanVar(value=preview_anterior)
+        var_preview.trace_add("write", lambda *args: salvar_estado_projeto())
         chk_preview = tk.Checkbutton(row, text="Preview", variable=var_preview, bg="#FFFFFF")
         chk_preview.pack(side="left", padx=4)
 
@@ -1324,6 +1485,7 @@ def carregar_capitulos():
 
     txt_saida.insert(tk.END, f"{len(segments)} capítulos carregados.\n")
     txt_saida.see(tk.END)
+    salvar_estado_projeto()
 
 
 def gerar_capitulos_automaticamente():
@@ -1430,30 +1592,58 @@ def _rolar_com_mouse(event):
 
 canvas_principal.bind_all("<MouseWheel>", _rolar_com_mouse)
 
-pasta_projeto_var = tk.StringVar(value="Nenhum projeto criado")
+pasta_projeto_var = tk.StringVar(value="Nenhum projeto aberto")
 
 frame_projeto = tk.Frame(frame_conteudo, bg="#7F14B7")
 frame_projeto.pack(pady=8)
 
-btn_projeto = tk.Button(
+lbl_lista_projetos = tk.Label(
+    frame_projeto, text="Projeto:", bg="#7F14B7", fg="#FEF500", font=("Industry-Black", 10, "bold")
+)
+lbl_lista_projetos.pack(side="left", padx=(0, 5))
+
+combo_projetos = Combobox(frame_projeto, state="readonly", width=35)
+combo_projetos.pack(side="left", padx=5)
+
+btn_abrir_projeto = tk.Button(
     frame_projeto,
-    text="Criar Projeto da Live",
-    command=selecionar_pasta_projeto,
+    text="Abrir Projeto Selecionado",
+    command=abrir_projeto_selecionado,
     bg="#FEF500",
     fg="#7F14B7",
-    font=("Industry-Black", 10, "bold")
+    font=("Industry-Black", 9, "bold")
 )
-btn_projeto.pack(side="left", padx=5)
+btn_abrir_projeto.pack(side="left", padx=5)
+
+btn_novo_projeto = tk.Button(
+    frame_projeto,
+    text="Criar Novo Projeto",
+    command=criar_novo_projeto,
+    bg="#FEF500",
+    fg="#7F14B7",
+    font=("Industry-Black", 9, "bold")
+)
+btn_novo_projeto.pack(side="left", padx=5)
+
+frame_projeto_ativo = tk.Frame(frame_conteudo, bg="#7F14B7")
+frame_projeto_ativo.pack(pady=(0, 8))
 
 lbl_projeto = tk.Label(
-    frame_projeto,
+    frame_projeto_ativo,
     textvariable=pasta_projeto_var,
     bg="#7F14B7",
     fg="#FFFFFF",
-    wraplength=500,
+    wraplength=600,
     justify="left"
 )
-lbl_projeto.pack(side="left", padx=5)
+lbl_projeto.pack()
+
+# Preenche a lista com os projetos já criados — a abertura automática
+# do mais recente acontece só no final do arquivo, depois que todos os
+# outros widgets (capítulos, saída, etc) já existirem
+_projetos_existentes = atualizar_lista_projetos()
+if _projetos_existentes:
+    combo_projetos.set(_projetos_existentes[0]["nome"])
 
 lbl_instrucao = tk.Label(frame_conteudo, text="Cole as timestamps aqui:", bg="#7F14B7", fg="#FEF500", font=("Industry-Black", 12, "bold"))
 lbl_instrucao.pack(pady=10)
@@ -1830,6 +2020,13 @@ btn_posicionar_logo = tk.Button(
     font=("Industry-Black", 10, "bold")
 )
 btn_posicionar_logo.pack(side="left", padx=10)
+
+# Abre automaticamente o projeto mais recente (se algum já existir),
+# pra retomar de onde parou sem precisar clicar em nada — feito aqui no
+# final porque depende de widgets (frame_capitulos, txt_saida, etc.)
+# que só existem depois de toda a interface montada
+if _projetos_existentes:
+    abrir_projeto_selecionado()
 
 # Inicia a interface
 tela.mainloop()

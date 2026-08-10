@@ -49,6 +49,9 @@ blocos_transcricao_atual = None
 LOGO_POSICAO_X = None
 LOGO_POSICAO_Y = None
 
+
+PASTA_PROJETO_ATUAL = None
+
 def get_clean_title(title):
     #Remove acentos
     title = unicodedata.normalize("NFD", title)
@@ -193,6 +196,41 @@ def download_youtube_video(url, output_dir):
     return filepath
 
 
+def selecionar_pasta_projeto():
+    """
+    Pede o NOME do projeto da live (não uma pasta pra escolher) e cria
+    a pasta com esse nome, na pasta atual — com a estrutura padrão já
+    dentro dela:
+        <projeto>/cortes/
+        <projeto>/preview/
+        <projeto>/thumbnail/            (os .psd finais ficam direto aqui)
+        <projeto>/thumbnail/thumbs_feitas/   (os .png finais ficam aqui)
+    Cortes, previews e thumbnails gerados depois disso passam a usar
+    essa estrutura em vez de pastas soltas com data no nome.
+    """
+    global PASTA_PROJETO_ATUAL
+
+    nome_projeto = simpledialog.askstring(
+        "Nome do projeto",
+        "Nome da live/projeto (vira o nome da pasta):"
+    )
+    if not nome_projeto:
+        return
+
+    nome_pasta = get_clean_title(nome_projeto)
+    pasta = os.path.join(os.getcwd(), nome_pasta)
+
+    os.makedirs(os.path.join(pasta, "cortes"), exist_ok=True)
+    os.makedirs(os.path.join(pasta, "preview"), exist_ok=True)
+    os.makedirs(os.path.join(pasta, "thumbnail", "thumbs_feitas"), exist_ok=True)
+
+    PASTA_PROJETO_ATUAL = pasta
+    pasta_projeto_var.set(pasta)
+
+    txt_saida.insert(tk.END, f"Projeto criado: {pasta}\n")
+    txt_saida.see(tk.END)
+
+
 def resolver_video():
     """
     Botão único: baixa o vídeo do YouTube (se houver link) ou abre o diálogo
@@ -295,12 +333,17 @@ def generate_clips():
     fade_duration = 1.4
 
     ## Pasta de Output ##
-    date = datetime.now().strftime("%d/%m/%Y %H:%M")
-    date = get_clean_title(date)
-
     pasta_original = os.getcwd()
-    os.makedirs(f"cortes - {date}", exist_ok=True)
-    os.chdir(f"./cortes - {date}")
+
+    if PASTA_PROJETO_ATUAL:
+        pasta_destino = os.path.join(PASTA_PROJETO_ATUAL, "cortes")
+    else:
+        date = datetime.now().strftime("%d/%m/%Y %H:%M")
+        date = get_clean_title(date)
+        pasta_destino = f"cortes - {date}"
+
+    os.makedirs(pasta_destino, exist_ok=True)
+    os.chdir(pasta_destino)
 
     ## Processamento dos segmentos ##
     total_segments = len(segments)
@@ -513,14 +556,18 @@ def generate_clips_preview():
         messagebox.showinfo("Aviso", "Nenhum capítulo marcado para gerar preview.")
         return
 
-    #Formata para exibir apenas o dia (DD/MM/AAAA) e o horário (HH:MM)
-    date = datetime.now().strftime("%d/%m/%Y %H:%M")
-    date = get_clean_title(date)
-
     pasta_original = os.getcwd()
-    pasta_preview_atual = os.path.join(pasta_original, f"preview - {date}")
-    os.makedirs(f"preview - {date}", exist_ok=True)
-    os.chdir(f"./preview - {date}")
+
+    if PASTA_PROJETO_ATUAL:
+        pasta_preview_atual = os.path.join(PASTA_PROJETO_ATUAL, "preview")
+    else:
+        #Formata para exibir apenas o dia (DD/MM/AAAA) e o horário (HH:MM)
+        date = datetime.now().strftime("%d/%m/%Y %H:%M")
+        date = get_clean_title(date)
+        pasta_preview_atual = os.path.join(pasta_original, f"preview - {date}")
+
+    os.makedirs(pasta_preview_atual, exist_ok=True)
+    os.chdir(pasta_preview_atual)
 
     total_segments = len(segments)
     for i, seg in enumerate(segments):
@@ -1113,6 +1160,16 @@ def gerar_thumbnail_para_capitulo(title, seg):
     txt_saida.see(tk.END)
     tela.update_idletasks()
 
+    pasta_thumbnail_raiz = None
+    if PASTA_PROJETO_ATUAL:
+        pasta_thumbnail_raiz = os.path.join(PASTA_PROJETO_ATUAL, "thumbnail")
+        # Arquivos de trabalho (frame bruto, sem fundo) ficam numa
+        # subpasta própria de cada corte — mais organizado. O .psd e o
+        # .png finais são movidos pra fora dessa subpasta logo abaixo.
+        pasta_saida_geracao = os.path.join(pasta_thumbnail_raiz, get_clean_title(title))
+    else:
+        pasta_saida_geracao = PASTA_SAIDA_THUMBNAILS
+
     try:
         resultado_thumb = montar_thumbnail_completa(
             CAMINHO_TEMPLATE_THUMBNAIL,
@@ -1120,7 +1177,7 @@ def gerar_thumbnail_para_capitulo(title, seg):
             caminho_imagem_sugerida,
             linha1,
             linha2,
-            PASTA_SAIDA_THUMBNAILS,
+            pasta_saida_geracao,
             title,
             lado_forcado=LADO_THUMBNAIL_PADRAO,
         )
@@ -1137,6 +1194,25 @@ def gerar_thumbnail_para_capitulo(title, seg):
             "O programa continua funcionando normalmente — só essa thumbnail não foi gerada."
         )
         return
+
+    if resultado_thumb and pasta_thumbnail_raiz:
+        # Reorganiza: .psd fica direto na raiz de thumbnail/ (fácil
+        # acesso), .png final vai pra thumbnail/thumbs_feitas/ — só os
+        # arquivos de trabalho continuam na subpasta própria do corte
+        pasta_thumbs_feitas = os.path.join(pasta_thumbnail_raiz, "thumbs_feitas")
+        os.makedirs(pasta_thumbs_feitas, exist_ok=True)
+
+        caminho_psd_gerado = re.sub(r"\.png$", ".psd", resultado_thumb, flags=re.IGNORECASE)
+        destino_png = os.path.join(pasta_thumbs_feitas, os.path.basename(resultado_thumb))
+        destino_psd = os.path.join(pasta_thumbnail_raiz, os.path.basename(caminho_psd_gerado))
+
+        try:
+            shutil.move(resultado_thumb, destino_png)
+            resultado_thumb = destino_png
+            if os.path.exists(caminho_psd_gerado):
+                shutil.move(caminho_psd_gerado, destino_psd)
+        except OSError as e:
+            txt_saida.insert(tk.END, f"[AVISO] Thumbnail gerada, mas não consegui reorganizar os arquivos: {e}\n")
 
     if resultado_thumb:
         txt_saida.insert(tk.END, f"Thumbnail pronta: {resultado_thumb}\n")
@@ -1353,6 +1429,31 @@ def _rolar_com_mouse(event):
     canvas_principal.yview_scroll(int(-1 * (event.delta / 120)), "units")
 
 canvas_principal.bind_all("<MouseWheel>", _rolar_com_mouse)
+
+pasta_projeto_var = tk.StringVar(value="Nenhum projeto criado")
+
+frame_projeto = tk.Frame(frame_conteudo, bg="#7F14B7")
+frame_projeto.pack(pady=8)
+
+btn_projeto = tk.Button(
+    frame_projeto,
+    text="Criar Projeto da Live",
+    command=selecionar_pasta_projeto,
+    bg="#FEF500",
+    fg="#7F14B7",
+    font=("Industry-Black", 10, "bold")
+)
+btn_projeto.pack(side="left", padx=5)
+
+lbl_projeto = tk.Label(
+    frame_projeto,
+    textvariable=pasta_projeto_var,
+    bg="#7F14B7",
+    fg="#FFFFFF",
+    wraplength=500,
+    justify="left"
+)
+lbl_projeto.pack(side="left", padx=5)
 
 lbl_instrucao = tk.Label(frame_conteudo, text="Cole as timestamps aqui:", bg="#7F14B7", fg="#FEF500", font=("Industry-Black", 12, "bold"))
 lbl_instrucao.pack(pady=10)

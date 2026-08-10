@@ -1,7 +1,7 @@
 import tkinter as tk
 from tkinter import scrolledtext, messagebox
 from datetime import datetime, timedelta
-from tkinter import Tk, font, filedialog
+from tkinter import Tk, font, filedialog, simpledialog
 from tkinter.ttk import *
 import unicodedata
 import re
@@ -9,13 +9,14 @@ import os
 import subprocess
 import shutil
 
-from detectar_capitulos import detectar_capitulos, carregar_transcricao as carregar_transcricao_ia
-from gerar_metadata_capitulo import carregar_json, selecionar_exemplos_few_shot, avaliar_capitulo
-from pipeline_thumbnail import montar_thumbnail_completa
-
 from dotenv import load_dotenv
 caminho_env = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".env")
 load_dotenv(caminho_env)
+
+from detectar_capitulos import detectar_capitulos, carregar_transcricao as carregar_transcricao_ia
+from gerar_metadata_capitulo import carregar_json, selecionar_exemplos_few_shot, avaliar_capitulo
+from pipeline_thumbnail import montar_thumbnail_completa
+from PIL import Image, ImageTk
 
 LOGO_PADRAO_PATH = r"C:\Users\andre\Downloads\TEMPLATE\TEMPLATE\logo.png"
 
@@ -42,6 +43,10 @@ metadata_ia = {}
 # na função reset se você adicionar isso depois)
 caminho_transcricao_atual = None
 blocos_transcricao_atual = None
+
+
+LOGO_POSICAO_X = None
+LOGO_POSICAO_Y = None
 
 def get_clean_title(title):
     #Remove acentos
@@ -375,10 +380,15 @@ def generate_clips():
                 else:
                     video_chain = "null"
 
+                if LOGO_POSICAO_X is not None and LOGO_POSICAO_Y is not None:
+                    posicao_overlay = f"{LOGO_POSICAO_X}:{LOGO_POSICAO_Y}"
+                else:
+                    posicao_overlay = "W-w-40:40"
+
                 filter_complex = (
                     f'"[1:v]scale=227:227[logo];'
                     f'[0:v]scale=1920:1080,{video_chain}[base];'
-                    f'[base][logo]overlay=W-w-40:40[outv]"'
+                    f'[base][logo]overlay={posicao_overlay}[outv]"'
                 )
 
             else:
@@ -1245,6 +1255,126 @@ lbl_logo = tk.Label(
 
 lbl_logo.pack(side="left")
 
+def abrir_posicionador_logo():
+    """
+    Abre uma janela com um frame do vídeo já resolvido, com a logo por
+    cima — arrasta ela pra posição desejada e clica em "Confirmar
+    posição". Isso substitui ter que editar o código toda vez que quer
+    mudar onde a logo aparece nos cortes.
+    """
+    path = get_video_source()
+    if not path:
+        return
+
+    if not logo_path_var.get():
+        messagebox.showerror("Erro", "Selecione uma logo primeiro (\"Selecionar Logo\").")
+        return
+
+    timestamp_frame = simpledialog.askstring(
+        "Frame pra visualizar",
+        "Em que ponto do vídeo pegar o frame de referência? (HH:MM:SS)\n"
+        "Evita a tela de espera do início — usa um momento com conteúdo de verdade.",
+        initialvalue="00:05:00"
+    )
+    if not timestamp_frame:
+        return
+
+    caminho_frame = os.path.join(os.path.dirname(os.path.abspath(__file__)), "_frame_preview_logo.jpg")
+    resultado_ffmpeg = subprocess.run(
+        ["ffmpeg", "-y", "-ss", timestamp_frame, "-i", path, "-frames:v", "1", caminho_frame],
+        capture_output=True, text=True
+    )
+    if resultado_ffmpeg.returncode != 0:
+        messagebox.showerror("Erro", f"Falha ao extrair frame do vídeo:\n{resultado_ffmpeg.stderr[-300:]}")
+        return
+
+    # O ffmpeg SEMPRE redimensiona o vídeo pra 1920x1080 antes de aplicar
+    # a logo (scale=1920:1080 no filtro), independente da resolução real
+    # do arquivo baixado. Se a gente calculasse a escala com base na
+    # resolução nativa do frame (que pode não ser 1920x1080), a
+    # pré-visualização ficaria desproporcional ao render final de
+    # verdade — por isso força esse resize aqui primeiro, igual o ffmpeg.
+    LARGURA_RENDER = 1920
+    ALTURA_RENDER = 1080
+    img_frame = Image.open(caminho_frame).resize((LARGURA_RENDER, ALTURA_RENDER))
+
+    # Escala a exibição pra caber numa janela razoável, mantendo a
+    # proporção — as coordenadas finais são convertidas de volta pra
+    # resolução real do vídeo (1920x1080) ao confirmar
+    largura_exibida = 800
+    escala = largura_exibida / LARGURA_RENDER
+    altura_exibida = int(ALTURA_RENDER * escala)
+
+    img_frame_tk = ImageTk.PhotoImage(img_frame.resize((largura_exibida, altura_exibida)))
+
+    img_logo = Image.open(logo_path_var.get()).convert("RGBA")
+    logo_lado_real = 227  # mesmo tamanho do scale=227:227 usado no ffmpeg
+    logo_lado_exibido = max(1, int(logo_lado_real * escala))
+    img_logo_tk = ImageTk.PhotoImage(img_logo.resize((logo_lado_exibido, logo_lado_exibido)))
+
+    janela = tk.Toplevel(tela)
+    janela.title("Posicionar logo — arraste pra ajustar")
+
+    canvas = tk.Canvas(janela, width=largura_exibida, height=altura_exibida)
+    canvas.pack()
+    canvas.create_image(0, 0, anchor="nw", image=img_frame_tk)
+    canvas.imagem_frame_ref = img_frame_tk  # evita a imagem ser coletada como lixo
+
+    # Posição inicial: usa a já definida antes, ou o padrão antigo
+    # (canto superior direito, 40px de margem) se ainda não tiver nenhuma
+    if LOGO_POSICAO_X is not None and LOGO_POSICAO_Y is not None:
+        x_inicial = int(LOGO_POSICAO_X * escala)
+        y_inicial = int(LOGO_POSICAO_Y * escala)
+    else:
+        x_inicial = largura_exibida - logo_lado_exibido - int(40 * escala)
+        y_inicial = int(40 * escala)
+
+    item_logo = canvas.create_image(x_inicial, y_inicial, anchor="nw", image=img_logo_tk)
+    canvas.imagem_logo_ref = img_logo_tk
+
+    estado_arraste = {"x": 0, "y": 0}
+
+    def iniciar_arraste(event):
+        estado_arraste["x"] = event.x
+        estado_arraste["y"] = event.y
+
+    def arrastar(event):
+        dx = event.x - estado_arraste["x"]
+        dy = event.y - estado_arraste["y"]
+        canvas.move(item_logo, dx, dy)
+        estado_arraste["x"] = event.x
+        estado_arraste["y"] = event.y
+
+    canvas.tag_bind(item_logo, "<ButtonPress-1>", iniciar_arraste)
+    canvas.tag_bind(item_logo, "<B1-Motion>", arrastar)
+
+    lbl_instrucao_arraste = tk.Label(
+        janela, text="Arraste a logo pra posição desejada",
+        font=("Industry-Black", 9)
+    )
+    lbl_instrucao_arraste.pack(pady=4)
+
+    def confirmar():
+        global LOGO_POSICAO_X, LOGO_POSICAO_Y
+        x_exibido, y_exibido = canvas.coords(item_logo)
+
+        LOGO_POSICAO_X = int(x_exibido / escala)
+        LOGO_POSICAO_Y = int(y_exibido / escala)
+
+        txt_saida.insert(tk.END, f"Posição da logo definida: x={LOGO_POSICAO_X}, y={LOGO_POSICAO_Y}\n")
+        txt_saida.see(tk.END)
+
+        if os.path.exists(caminho_frame):
+            os.remove(caminho_frame)
+        janela.destroy()
+
+    btn_confirmar = tk.Button(
+        janela, text="Confirmar posição", command=confirmar,
+        bg="#FEF500", fg="#7F14B7", font=("Industry-Black", 10, "bold")
+    )
+    btn_confirmar.pack(pady=10)
+
+
 def select_logo():
     path = filedialog.askopenfilename(
         title="Selecione a logo",
@@ -1279,6 +1409,16 @@ btn_logo = tk.Button(
 )
 
 btn_logo.pack(side="left", padx=10)
+
+btn_posicionar_logo = tk.Button(
+    frame_logo,
+    text="Posicionar Logo",
+    command=abrir_posicionador_logo,
+    bg="#FEF500",
+    fg="#7F14B7",
+    font=("Industry-Black", 10, "bold")
+)
+btn_posicionar_logo.pack(side="left", padx=10)
 
 # Inicia a interface
 tela.mainloop()

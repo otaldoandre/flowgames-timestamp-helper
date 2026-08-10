@@ -98,7 +98,7 @@ def caminho_estado_projeto(pasta_projeto):
 
 
 def salvar_estado_projeto():
-    """Salva o texto de timestamps colado e o estado das checkboxes do projeto atual."""
+    """Salva o texto de timestamps colado, o estado das checkboxes, o vídeo e a transcrição do projeto atual."""
     if not PASTA_PROJETO_ATUAL:
         return
 
@@ -109,6 +109,8 @@ def salvar_estado_projeto():
     estado = {
         "texto_timestamps": txt_entrada.get("1.0", tk.END),
         "capitulos": estado_capitulos,
+        "video_path": video_path_var.get(),
+        "caminho_transcricao": caminho_transcricao_atual or "",
     }
 
     try:
@@ -286,7 +288,7 @@ def criar_novo_projeto():
     o projeto na lista, e limpa a tela pra começar do zero (um projeto
     novo não carrega progresso de outro).
     """
-    global PASTA_PROJETO_ATUAL
+    global PASTA_PROJETO_ATUAL, caminho_transcricao_atual, blocos_transcricao_atual
 
     nome_projeto = simpledialog.askstring(
         "Nome do projeto",
@@ -315,6 +317,10 @@ def criar_novo_projeto():
         widget.destroy()
     capitulos_vars.clear()
     metadata_ia.clear()
+    video_path_var.set("")
+    caminho_transcricao_var.set("Nenhuma transcrição selecionada")
+    caminho_transcricao_atual = None
+    blocos_transcricao_atual = None
 
     txt_saida.insert(tk.END, f"Projeto criado: {pasta}\n")
     txt_saida.see(tk.END)
@@ -323,10 +329,10 @@ def criar_novo_projeto():
 def abrir_projeto_selecionado():
     """
     Abre o projeto escolhido no menu suspenso — restaura o texto de
-    timestamps e o estado das checkboxes salvos da última vez (se
-    houver), continuando de onde parou.
+    timestamps, o estado das checkboxes, o vídeo e a transcrição
+    salvos da última vez (se houver), continuando de onde parou.
     """
-    global PASTA_PROJETO_ATUAL
+    global PASTA_PROJETO_ATUAL, caminho_transcricao_atual, blocos_transcricao_atual
 
     nome_selecionado = combo_projetos.get()
     if not nome_selecionado:
@@ -359,6 +365,20 @@ def abrir_projeto_selecionado():
     if estado:
         txt_entrada.delete("1.0", tk.END)
         txt_entrada.insert("1.0", estado.get("texto_timestamps", "").strip())
+
+        video_path_salvo = estado.get("video_path", "")
+        if video_path_salvo:
+            video_path_var.set(video_path_salvo)
+
+        transcricao_salva = estado.get("caminho_transcricao", "")
+        if transcricao_salva and os.path.exists(transcricao_salva):
+            caminho_transcricao_atual = transcricao_salva
+            blocos_transcricao_atual = carregar_transcricao_ia(transcricao_salva)
+            caminho_transcricao_var.set(transcricao_salva)
+        elif transcricao_salva:
+            # Caminho salvo, mas o arquivo não existe mais nesse local —
+            # avisa em vez de falhar silenciosamente depois, na hora de gerar
+            txt_saida.insert(tk.END, f"[AVISO] Transcrição salva não encontrada: {transcricao_salva}\n")
 
         estado_capitulos = estado.get("capitulos", {})
         estado_por_titulo = {
@@ -412,6 +432,7 @@ def resolver_video():
         filepath = download_youtube_video(youtube_url, download_dir)
         if filepath:
             video_path_var.set(filepath)
+            salvar_estado_projeto()
 
     else:
         path = filedialog.askopenfilename(
@@ -420,6 +441,30 @@ def resolver_video():
         )
         if path:
             video_path_var.set(path)
+            salvar_estado_projeto()
+
+
+def selecionar_transcricao_manual():
+    """
+    Seleciona a transcrição do episódio explicitamente (em vez de só
+    ser perguntada de forma escondida na primeira vez que "Metadata"
+    ou "Thumbnail" precisam dela). Reaproveitada tanto pelo botão
+    quanto por obter_metadata_ia_do_capitulo() quando ainda não tem
+    nenhuma selecionada.
+    """
+    global caminho_transcricao_atual, blocos_transcricao_atual
+
+    caminho = filedialog.askopenfilename(
+        title="Selecione a transcrição do episódio",
+        filetypes=[("Arquivos de texto", "*.txt")]
+    )
+    if not caminho:
+        return
+
+    caminho_transcricao_atual = caminho
+    blocos_transcricao_atual = carregar_transcricao_ia(caminho)
+    caminho_transcricao_var.set(caminho)
+    salvar_estado_projeto()
 
 
 def get_video_source():
@@ -843,14 +888,9 @@ def obter_metadata_ia_do_capitulo(title, seg):
     global caminho_transcricao_atual, blocos_transcricao_atual
 
     if not caminho_transcricao_atual:
-        caminho_selecionado = filedialog.askopenfilename(
-            title="Selecione a transcrição do episódio",
-            filetypes=[("Arquivos de texto", "*.txt")]
-        )
-        if not caminho_selecionado:
+        selecionar_transcricao_manual()
+        if not caminho_transcricao_atual:
             return {}
-        caminho_transcricao_atual = caminho_selecionado
-        blocos_transcricao_atual = carregar_transcricao_ia(caminho_transcricao_atual)
 
     blocos = blocos_transcricao_atual
 
@@ -1694,6 +1734,31 @@ lbl_video_resolvido = tk.Label(
     justify="left"
 )
 lbl_video_resolvido.pack(side="left", padx=5)
+
+caminho_transcricao_var = tk.StringVar(value="Nenhuma transcrição selecionada")
+
+frame_transcricao = tk.Frame(frame_conteudo, bg="#7F14B7")
+frame_transcricao.pack(pady=5)
+
+btn_selecionar_transcricao = tk.Button(
+    frame_transcricao,
+    text="Selecionar Transcrição",
+    command=selecionar_transcricao_manual,
+    bg="#FEF500",
+    fg="#7F14B7",
+    font=("Industry-Black", 10, "bold")
+)
+btn_selecionar_transcricao.pack(side="left", padx=5)
+
+lbl_transcricao = tk.Label(
+    frame_transcricao,
+    textvariable=caminho_transcricao_var,
+    bg="#7F14B7",
+    fg="#FFFFFF",
+    wraplength=500,
+    justify="left"
+)
+lbl_transcricao.pack(side="left", padx=5)
 
 # Guarda a pasta do último preview gerado, pra dar pra abrir os arquivos depois
 ultima_pasta_preview_var = tk.StringVar()

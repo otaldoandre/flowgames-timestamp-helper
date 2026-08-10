@@ -773,6 +773,23 @@ def obter_duracao_video(path):
         return None
 
 
+def obter_fps_video(path):
+    """FPS do vídeo, via ffprobe. 30.0 como fallback se não conseguir detectar."""
+    resultado = subprocess.run(
+        ["ffprobe", "-v", "error", "-select_streams", "v:0", "-show_entries",
+         "stream=r_frame_rate", "-of", "default=noprint_wrappers=1:nokey=1", path],
+        capture_output=True, text=True
+    )
+    saida = resultado.stdout.strip()
+    try:
+        if "/" in saida:
+            numerador, denominador = saida.split("/")
+            return float(numerador) / float(denominador)
+        return float(saida)
+    except (ValueError, ZeroDivisionError):
+        return 30.0
+
+
 def _hhmmss_para_segundos(timestamp_str):
     dt = datetime.strptime(timestamp_str, "%H:%M:%S")
     return dt.hour * 3600 + dt.minute * 60 + dt.second
@@ -800,6 +817,9 @@ def abrir_scrubber_live(titulo_janela="Escolher frame da live", seg_atual=None):
     if not duracao_total:
         messagebox.showerror("Erro", "Não consegui determinar a duração do vídeo.")
         return None
+
+    fps_video = obter_fps_video(path)
+    duracao_frame = 1.0 / fps_video
 
     # Monta as faixas disponíveis: cada capítulo carregado + a live inteira
     faixas = {}
@@ -845,16 +865,29 @@ def abrir_scrubber_live(titulo_janela="Escolher frame da live", seg_atual=None):
     lbl_timestamp.pack()
 
     imagem_ref = {"img": None}
+    posicao_atual = {"segundos": 0.0}
+
+    def formatar_ts_exibicao(segundos):
+        segundos_int = int(segundos)
+        h, resto = divmod(segundos_int, 3600)
+        m, s = divmod(resto, 60)
+        return f"{h:02d}:{m:02d}:{s:02d}"
+
+    def formatar_ts_ffmpeg(segundos):
+        # Com fração de segundo (milissegundo) — precisão de segundo
+        # inteiro não é suficiente pra navegar frame a frame
+        h = int(segundos // 3600)
+        m = int((segundos % 3600) // 60)
+        s = segundos % 60
+        return f"{h:02d}:{m:02d}:{s:06.3f}"
 
     def atualizar_frame(segundos):
-        segundos = int(float(segundos))
-        h, resto = divmod(segundos, 3600)
-        m, s = divmod(resto, 60)
-        ts_str = f"{h:02d}:{m:02d}:{s:02d}"
-        lbl_timestamp.config(text=ts_str)
+        segundos = float(segundos)
+        posicao_atual["segundos"] = segundos
+        lbl_timestamp.config(text=formatar_ts_exibicao(segundos))
 
         resultado_ffmpeg = subprocess.run(
-            ["ffmpeg", "-y", "-ss", ts_str, "-i", path, "-frames:v", "1", caminho_preview],
+            ["ffmpeg", "-y", "-ss", formatar_ts_ffmpeg(segundos), "-i", path, "-frames:v", "1", caminho_preview],
             capture_output=True, text=True
         )
         if resultado_ffmpeg.returncode == 0 and os.path.exists(caminho_preview):
@@ -885,13 +918,17 @@ def abrir_scrubber_live(titulo_janela="Escolher frame da live", seg_atual=None):
     combo_faixa.bind("<<ComboboxSelected>>", trocar_faixa)
 
     def ajustar(delta):
-        novo_valor = max(slider.cget("from"), min(slider.cget("to"), slider.get() + delta))
-        slider.set(novo_valor)
+        # Sempre parte de posicao_atual (fração de segundo), não do
+        # slider (só tem precisão de segundo inteiro) — senão ajuste de
+        # frame não tem efeito nenhum depois de arredondar
+        novo_valor = max(slider.cget("from"), min(slider.cget("to"), posicao_atual["segundos"] + delta))
+        slider.set(int(novo_valor))
         atualizar_frame(novo_valor)
 
     frame_ajuste_fino = tk.Frame(janela, bg="#7F14B7")
     frame_ajuste_fino.pack(pady=5)
-    for rotulo, delta in [("-10s", -10), ("-1s", -1), ("+1s", 1), ("+10s", 10)]:
+    for rotulo, delta in [("-10s", -10), ("-1s", -1), ("-1 frame", -duracao_frame),
+                           ("+1 frame", duracao_frame), ("+1s", 1), ("+10s", 10)]:
         tk.Button(
             frame_ajuste_fino, text=rotulo, command=lambda d=delta: ajustar(d),
             bg="#FEF500", fg="#7F14B7", font=("Industry-Black", 9, "bold")

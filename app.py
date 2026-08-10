@@ -19,8 +19,8 @@ LOGO_PADRAO_PATH = r"C:\Users\andre\Downloads\TEMPLATE\TEMPLATE\logo.png"
 CAMINHO_TREINO_IA = r"C:\Users\andre\Downloads\projetos\flowgames-timestamp-helper\scripts\dados_cortes_flow_games\fase2_treino.json"
 
 # Template de thumbnail e pasta de saída — ajusta esses dois caminhos
-CAMINHO_TEMPLATE_THUMBNAIL = r"C:\caminho\para\thumb_corte_template.psd"
-PASTA_SAIDA_THUMBNAILS = r"C:\caminho\para\pasta_thumbnails"
+CAMINHO_TEMPLATE_THUMBNAIL = r"C:\Users\andre\Downloads\projetos\flowgames-timestamp-helper\thumb_corte_template.psd"
+PASTA_SAIDA_THUMBNAILS = r"C:\Users\andre\Downloads\projetos\flowgames-timestamp-helper\thumbnails"
 
 # Detecção automática de lado (esquerda/direita do host) ainda não é
 # confiável nos frames reais — força um lado fixo aqui até isso
@@ -657,6 +657,23 @@ def obter_metadata_ia_do_capitulo(title, seg):
     return {}
 
 
+def dividir_texto_thumbnail(texto):
+    """
+    Quebra um texto em duas linhas, dividindo as palavras ao meio,
+    usado só quando a IA não devolveu texto_thumbnail já dividido em
+    linha1/linha2. O template tem duas caixas de texto (uma branca em
+    cima, uma amarela embaixo), jogar tudo numa linha só estoura o
+    espaço reservado pra ela.
+    """
+    palavras = texto.split()
+    if len(palavras) <= 1:
+        return texto, ""
+    meio = (len(palavras) + 1) // 2
+    linha1 = " ".join(palavras[:meio])
+    linha2 = " ".join(palavras[meio:])
+    return linha1, linha2
+
+
 def gerar_thumbnail_para_capitulo(title, seg):
     """
     Gera a thumbnail completa (fundo removido do host, layout, texto,
@@ -683,8 +700,17 @@ def gerar_thumbnail_para_capitulo(title, seg):
 
     dados_ia = obter_metadata_ia_do_capitulo(title, seg)
     texto_thumb = dados_ia.get("texto_thumbnail") or {}
-    linha1 = texto_thumb.get("linha1") or dados_ia.get("titulo") or title
-    linha2 = texto_thumb.get("linha2") or ""
+
+    if texto_thumb.get("linha1") or texto_thumb.get("linha2"):
+        linha1 = texto_thumb.get("linha1") or ""
+        linha2 = texto_thumb.get("linha2") or ""
+    else:
+        # A IA não devolveu texto já dividido (ou não tem metadata
+        # nenhuma), divide o título/quote em duas linhas na força
+        # bruta, pra nunca estourar a linha de cima sozinha e deixar a
+        # de baixo vazia. O template é feito pra 2 linhas curtas, não 1 longa.
+        texto_base = dados_ia.get("titulo") or title
+        linha1, linha2 = dividir_texto_thumbnail(texto_base)
 
     inicio_dt = datetime.strptime(seg["start"], "%H:%M:%S")
     timestamp_frame = (inicio_dt + timedelta(seconds=5)).strftime("%H:%M:%S")

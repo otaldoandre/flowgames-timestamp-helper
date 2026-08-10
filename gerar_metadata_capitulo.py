@@ -17,7 +17,6 @@ import time
 
 from google import genai
 
-GEMINI_API_KEY = "AIzaSyAZqwyPaye4VZH9pZvDmQi5Rokywo6endQ"
 MODEL_NAME     = "gemini-3.1-flash-lite"  # mesmo modelo usado no notebook
 
 N_EXEMPLOS_POSITIVOS = 4
@@ -75,6 +74,13 @@ de destaque do host, uma descrição curta, um texto curto pra thumbnail
 e uma sugestão de imagem pra thumbnail — mesmo que a probabilidade seja
 baixa, o rascunho ajuda o editor a decidir.
 
+IMPORTANTE sobre quem é o host: os exemplos abaixo são só pra calibrar o
+formato e o estilo da resposta — NÃO presuma que o trecho que você vai
+avaliar agora envolve a mesma pessoa dos exemplos. Vários hosts diferentes
+participam do canal. Identifique quem fala e quem é o assunto central
+SOMENTE pelo texto do trecho atual (no final deste prompt), nunca pelos
+exemplos.
+
 Sobre o texto_thumbnail: é DIFERENTE da quote_destaque. A quote_destaque
 pode ser uma frase inteira; o texto_thumbnail precisa ser bem mais
 curto — só cabe 3-5 palavras por linha, em 2 linhas, no template real
@@ -119,7 +125,8 @@ Texto do capítulo a avaliar:
 """
 
 
-def chamar_gemini(prompt, api_key=GEMINI_API_KEY, model_name=MODEL_NAME, max_tentativas=MAX_TENTATIVAS):
+def chamar_gemini(prompt, api_key=None, model_name=MODEL_NAME, max_tentativas=MAX_TENTATIVAS):
+    api_key = api_key or os.environ.get("GEMINI_API_KEY")
     if not api_key:
         raise RuntimeError("GEMINI_API_KEY não encontrada. Defina a variável de ambiente antes de rodar.")
 
@@ -232,7 +239,7 @@ def normalizar_probabilidade(valor):
     return None
 
 
-def avaliar_capitulo(capitulo, exemplos, api_key=GEMINI_API_KEY):
+def avaliar_capitulo(capitulo, exemplos, api_key=None):
     """Recebe um capítulo (dict com 'texto') e retorna a avaliação do Gemini, ou None se falhar."""
     prompt = montar_prompt(exemplos, capitulo["texto"])
     resultado = chamar_gemini(prompt, api_key=api_key)
@@ -262,7 +269,7 @@ def avaliar_capitulo(capitulo, exemplos, api_key=GEMINI_API_KEY):
 
 if __name__ == "__main__":
     # Teste rápido em UM capítulo de treino, só pra ver o formato da resposta
-    treino = carregar_json(os.path.join("scripts/dados_cortes_flow_games", "fase2_treino.json"))
+    treino = carregar_json(os.path.join("dados_cortes_flow_games", "fase2_treino.json"))
     exemplos = selecionar_exemplos_few_shot(treino)
 
     # Pega um capítulo qualquer que NÃO esteja nos exemplos, só pra teste

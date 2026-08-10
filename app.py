@@ -659,10 +659,10 @@ def obter_metadata_ia_do_capitulo(title, seg):
 
 def dividir_texto_thumbnail(texto):
     """
-    Quebra um texto em duas linhas, dividindo as palavras ao meio,
+    Quebra um texto em duas linhas, dividindo as palavras ao meio —
     usado só quando a IA não devolveu texto_thumbnail já dividido em
     linha1/linha2. O template tem duas caixas de texto (uma branca em
-    cima, uma amarela embaixo), jogar tudo numa linha só estoura o
+    cima, uma amarela embaixo); jogar tudo numa linha só estoura o
     espaço reservado pra ela.
     """
     palavras = texto.split()
@@ -672,6 +672,58 @@ def dividir_texto_thumbnail(texto):
     linha1 = " ".join(palavras[:meio])
     linha2 = " ".join(palavras[meio:])
     return linha1, linha2
+
+
+def mostrar_metadata_capitulo(title, seg):
+    """
+    Abre uma janela mostrando o metadata gerado pela IA pra esse
+    capítulo — título, probabilidade de virar corte, quote de destaque,
+    descrição, sugestão de imagem, texto de thumbnail — sem precisar
+    abrir JSON na mão. Se ainda não tiver metadata gerado, oferece
+    gerar na hora (mesma lógica do botão de thumbnail).
+    """
+    dados_ia = obter_metadata_ia_do_capitulo(title, seg)
+    if not dados_ia:
+        messagebox.showinfo("Metadata", "Sem metadata disponível pra esse capítulo.")
+        return
+
+    janela = tk.Toplevel(tela)
+    janela.title(f"Metadata — {title}")
+    janela.geometry("520x480")
+    janela.configure(bg="#7F14B7")
+
+    def adicionar_linha(rotulo, valor):
+        frame_linha = tk.Frame(janela, bg="#7F14B7")
+        frame_linha.pack(fill="x", padx=12, pady=5, anchor="w")
+        tk.Label(
+            frame_linha, text=rotulo, bg="#7F14B7", fg="#FEF500",
+            font=("Industry-Black", 9, "bold")
+        ).pack(anchor="w")
+        tk.Label(
+            frame_linha, text=valor or "(vazio)", bg="#FFFFFF", fg="#000000",
+            wraplength=480, justify="left", anchor="w"
+        ).pack(anchor="w", fill="x")
+
+    probabilidade = dados_ia.get("probabilidade_corte")
+    adicionar_linha("Título sugerido:", dados_ia.get("titulo"))
+    adicionar_linha(
+        "Probabilidade de virar corte:",
+        f"{probabilidade}%" if probabilidade is not None else None
+    )
+    adicionar_linha("Quote de destaque:", dados_ia.get("quote_destaque"))
+    adicionar_linha("Descrição:", dados_ia.get("descricao"))
+    adicionar_linha("Sugestão de imagem:", dados_ia.get("sugestao_imagem"))
+
+    texto_thumb = dados_ia.get("texto_thumbnail")
+    if texto_thumb:
+        adicionar_linha("Texto de thumbnail (linha 1):", texto_thumb.get("linha1"))
+        adicionar_linha("Texto de thumbnail (linha 2):", texto_thumb.get("linha2"))
+    else:
+        adicionar_linha(
+            "Texto de thumbnail:",
+            "Não disponível — esse metadata é de antes desse campo existir, "
+            "ou veio de um JSON antigo. Gera de novo pra ter esse campo."
+        )
 
 
 def gerar_thumbnail_para_capitulo(title, seg):
@@ -706,7 +758,7 @@ def gerar_thumbnail_para_capitulo(title, seg):
         linha2 = texto_thumb.get("linha2") or ""
     else:
         # A IA não devolveu texto já dividido (ou não tem metadata
-        # nenhuma), divide o título/quote em duas linhas na força
+        # nenhuma) — divide o título/quote em duas linhas na força
         # bruta, pra nunca estourar a linha de cima sozinha e deixar a
         # de baixo vazia. O template é feito pra 2 linhas curtas, não 1 longa.
         texto_base = dados_ia.get("titulo") or title
@@ -838,6 +890,16 @@ def carregar_capitulos():
             font=("Industry-Black", 8, "bold")
         )
         btn_thumbnail.pack(side="left", padx=2)
+
+        btn_metadata = tk.Button(
+            row,
+            text="📋 Metadata",
+            command=lambda t=seg["title"], s=seg: mostrar_metadata_capitulo(t, s),
+            bg="#FEF500",
+            fg="#7F14B7",
+            font=("Industry-Black", 8, "bold")
+        )
+        btn_metadata.pack(side="left", padx=2)
 
         capitulos_vars[seg["title"]] = {"corte": var_corte, "preview": var_preview, "seg": seg}
 

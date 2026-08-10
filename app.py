@@ -9,6 +9,7 @@ import os
 import subprocess
 import shutil
 
+
 from dotenv import load_dotenv
 caminho_env = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".env")
 load_dotenv(caminho_env)
@@ -759,14 +760,284 @@ def mostrar_metadata_capitulo(title, seg):
         )
 
 
+def obter_duracao_video(path):
+    """Duração total do vídeo em segundos, via ffprobe. None se não conseguir."""
+    resultado = subprocess.run(
+        ["ffprobe", "-v", "error", "-show_entries", "format=duration",
+         "-of", "default=noprint_wrappers=1:nokey=1", path],
+        capture_output=True, text=True
+    )
+    try:
+        return float(resultado.stdout.strip())
+    except ValueError:
+        return None
+
+
+def _hhmmss_para_segundos(timestamp_str):
+    dt = datetime.strptime(timestamp_str, "%H:%M:%S")
+    return dt.hour * 3600 + dt.minute * 60 + dt.second
+
+
+def abrir_scrubber_live(titulo_janela="Escolher frame da live", seg_atual=None):
+    """
+    Player simplificado com slider pra navegar por um trecho da live —
+    arrasta e solta o slider pra ver o frame daquele momento, e
+    confirma quando achar um bom. Não é vídeo rodando de verdade (isso
+    exigiria decodificar vídeo dentro do Tkinter, bem mais pesado) —
+    é "arrasta e vê o frame extraído na hora".
+
+    Por padrão o slider fica limitado ao capítulo atual (bem mais
+    sensível que cobrir a live inteira de uma vez, já que a faixa é bem
+    menor) — mas dá pra trocar pra qualquer outro capítulo carregado, ou
+    pra live inteira, no menu suspenso. Os botões de ±1s/±10s ajudam a
+    refinar depois de chegar perto, sem depender só da precisão do mouse.
+    """
+    path = get_video_source()
+    if not path:
+        return None
+
+    duracao_total = obter_duracao_video(path)
+    if not duracao_total:
+        messagebox.showerror("Erro", "Não consegui determinar a duração do vídeo.")
+        return None
+
+    # Monta as faixas disponíveis: cada capítulo carregado + a live inteira
+    faixas = {}
+    for titulo_cap, info in capitulos_vars.items():
+        seg_cap = info["seg"]
+        inicio_cap = _hhmmss_para_segundos(seg_cap["start"])
+        fim_cap = _hhmmss_para_segundos(seg_cap["end"]) if seg_cap["end"] else duracao_total
+        faixas[titulo_cap] = (inicio_cap, fim_cap)
+
+    faixas["Toda a live"] = (0, duracao_total)
+
+    nome_padrao = "Toda a live"
+    if seg_atual is not None:
+        inicio_atual = _hhmmss_para_segundos(seg_atual["start"])
+        fim_atual = _hhmmss_para_segundos(seg_atual["end"]) if seg_atual["end"] else duracao_total
+        nome_padrao = next(
+            (nome for nome, (i, f) in faixas.items() if i == inicio_atual and f == fim_atual),
+            "Toda a live"
+        )
+
+    resultado = {"caminho": None}
+    caminho_preview = os.path.join(os.path.dirname(os.path.abspath(__file__)), "_frame_scrubber_live.jpg")
+
+    janela = tk.Toplevel(tela)
+    janela.title(titulo_janela)
+    janela.configure(bg="#7F14B7")
+    janela.grab_set()
+
+    tk.Label(
+        janela, text="Faixa de busca:", bg="#7F14B7", fg="#FEF500", font=("Industry-Black", 9, "bold")
+    ).pack(pady=(10, 0))
+
+    var_faixa = tk.StringVar(value=nome_padrao)
+    combo_faixa = Combobox(janela, textvariable=var_faixa, values=list(faixas.keys()), state="readonly", width=55)
+    combo_faixa.pack(pady=5)
+
+    lbl_imagem = tk.Label(janela, bg="#000000")
+    lbl_imagem.pack(padx=10, pady=10)
+
+    lbl_timestamp = tk.Label(
+        janela, text="00:00:00", bg="#7F14B7", fg="#FEF500", font=("Industry-Black", 10, "bold")
+    )
+    lbl_timestamp.pack()
+
+    imagem_ref = {"img": None}
+
+    def atualizar_frame(segundos):
+        segundos = int(float(segundos))
+        h, resto = divmod(segundos, 3600)
+        m, s = divmod(resto, 60)
+        ts_str = f"{h:02d}:{m:02d}:{s:02d}"
+        lbl_timestamp.config(text=ts_str)
+
+        resultado_ffmpeg = subprocess.run(
+            ["ffmpeg", "-y", "-ss", ts_str, "-i", path, "-frames:v", "1", caminho_preview],
+            capture_output=True, text=True
+        )
+        if resultado_ffmpeg.returncode == 0 and os.path.exists(caminho_preview):
+            img = Image.open(caminho_preview)
+            img.thumbnail((640, 360))
+            img_tk = ImageTk.PhotoImage(img)
+            imagem_ref["img"] = img_tk  # evita a imagem ser coletada como lixo
+            lbl_imagem.config(image=img_tk)
+
+    def ao_soltar_slider(event):
+        atualizar_frame(slider.get())
+
+    inicio_padrao, fim_padrao = faixas[nome_padrao]
+
+    slider = tk.Scale(
+        janela, from_=inicio_padrao, to=fim_padrao, orient="horizontal",
+        length=640, showvalue=False, bg="#7F14B7", fg="#FEF500", troughcolor="#FFFFFF"
+    )
+    slider.pack(padx=10, pady=5)
+    slider.bind("<ButtonRelease-1>", ao_soltar_slider)
+
+    def trocar_faixa(event=None):
+        inicio, fim = faixas[var_faixa.get()]
+        slider.config(from_=inicio, to=fim)
+        slider.set(inicio)
+        atualizar_frame(inicio)
+
+    combo_faixa.bind("<<ComboboxSelected>>", trocar_faixa)
+
+    def ajustar(delta):
+        novo_valor = max(slider.cget("from"), min(slider.cget("to"), slider.get() + delta))
+        slider.set(novo_valor)
+        atualizar_frame(novo_valor)
+
+    frame_ajuste_fino = tk.Frame(janela, bg="#7F14B7")
+    frame_ajuste_fino.pack(pady=5)
+    for rotulo, delta in [("-10s", -10), ("-1s", -1), ("+1s", 1), ("+10s", 10)]:
+        tk.Button(
+            frame_ajuste_fino, text=rotulo, command=lambda d=delta: ajustar(d),
+            bg="#FEF500", fg="#7F14B7", font=("Industry-Black", 9, "bold")
+        ).pack(side="left", padx=3)
+
+    def confirmar():
+        if imagem_ref["img"] is None:
+            messagebox.showinfo("Aviso", "Mexe no slider primeiro pra escolher um frame.")
+            return
+        resultado["caminho"] = caminho_preview
+        janela.destroy()
+
+    tk.Button(
+        janela, text="Confirmar esse frame", command=confirmar,
+        bg="#FEF500", fg="#7F14B7", font=("Industry-Black", 10, "bold")
+    ).pack(pady=10)
+
+    atualizar_frame(inicio_padrao)
+
+    janela.wait_window()
+    return resultado["caminho"]
+
+
+def selecionar_frame_host(seg, titulo_janela="Selecionar frame do host"):
+    """
+    Abre uma janela com miniaturas de frames candidatos espalhados pela
+    duração do corte, pra escolher qual vira o frame do host na
+    thumbnail. Também dá pra escolher um arquivo manual, ou buscar um
+    timestamp específico em qualquer outra parte da live — pro caso do
+    corte em si não ter um bom frame do host.
+
+    Retorna o caminho do frame escolhido, ou None se cancelado.
+    """
+    path = get_video_source()
+    if not path:
+        return None
+
+    inicio_dt = datetime.strptime(seg["start"], "%H:%M:%S")
+    inicio_segundos = inicio_dt.hour * 3600 + inicio_dt.minute * 60 + inicio_dt.second
+
+    if seg["end"]:
+        fim_dt = datetime.strptime(seg["end"], "%H:%M:%S")
+        fim_segundos = fim_dt.hour * 3600 + fim_dt.minute * 60 + fim_dt.second
+    else:
+        fim_segundos = inicio_segundos + 60  # sem fim definido, usa só 60s como faixa de candidatos
+
+    duracao = max(1, fim_segundos - inicio_segundos)
+    n_candidatos = min(6, max(2, duracao // 5))
+    passo = duracao / n_candidatos
+
+    pasta_temp = os.path.join(os.path.dirname(os.path.abspath(__file__)), "_frames_candidatos")
+    os.makedirs(pasta_temp, exist_ok=True)
+
+    caminhos_candidatos = []
+    for i in range(n_candidatos):
+        segundo_candidato = inicio_segundos + int(passo * i)
+        h, resto = divmod(segundo_candidato, 3600)
+        m, s = divmod(resto, 60)
+        ts_str = f"{h:02d}:{m:02d}:{s:02d}"
+
+        caminho_candidato = os.path.join(pasta_temp, f"candidato_{i}.jpg")
+        subprocess.run(
+            ["ffmpeg", "-y", "-ss", ts_str, "-i", path, "-frames:v", "1", caminho_candidato],
+            capture_output=True, text=True
+        )
+        if os.path.exists(caminho_candidato):
+            caminhos_candidatos.append((ts_str, caminho_candidato))
+
+    resultado = {"caminho": None}
+
+    janela = tk.Toplevel(tela)
+    janela.title(titulo_janela)
+    janela.configure(bg="#7F14B7")
+    janela.grab_set()  # trava interação com a janela principal até escolher
+
+    tk.Label(
+        janela, text="Clique no frame que quer usar:",
+        bg="#7F14B7", fg="#FEF500", font=("Industry-Black", 10, "bold")
+    ).pack(pady=8)
+
+    frame_grade = tk.Frame(janela, bg="#7F14B7")
+    frame_grade.pack(padx=10, pady=5)
+
+    imagens_ref = []  # evita as miniaturas serem coletadas como lixo antes da janela fechar
+
+    def escolher(caminho):
+        resultado["caminho"] = caminho
+        janela.destroy()
+
+    for i, (ts_str, caminho_candidato) in enumerate(caminhos_candidatos):
+        img = Image.open(caminho_candidato)
+        img.thumbnail((200, 200))
+        img_tk = ImageTk.PhotoImage(img)
+        imagens_ref.append(img_tk)
+
+        frame_item = tk.Frame(frame_grade, bg="#FFFFFF")
+        frame_item.grid(row=i // 3, column=i % 3, padx=5, pady=5)
+
+        tk.Button(frame_item, image=img_tk, command=lambda c=caminho_candidato: escolher(c)).pack()
+        tk.Label(frame_item, text=ts_str, bg="#FFFFFF").pack()
+
+    def escolher_arquivo():
+        caminho = filedialog.askopenfilename(
+            title="Selecione a imagem do host",
+            filetypes=[("Imagens", "*.jpg *.jpeg *.png")]
+        )
+        if caminho:
+            resultado["caminho"] = caminho
+            janela.destroy()
+
+    def buscar_outro_timestamp():
+        caminho_escolhido = abrir_scrubber_live(
+            titulo_janela="Buscar frame em outro momento da live",
+            seg_atual=seg
+        )
+        if caminho_escolhido:
+            resultado["caminho"] = caminho_escolhido
+            janela.destroy()
+
+    frame_botoes_extra = tk.Frame(janela, bg="#7F14B7")
+    frame_botoes_extra.pack(pady=10)
+
+    tk.Button(
+        frame_botoes_extra, text="Escolher arquivo manualmente", command=escolher_arquivo,
+        bg="#FEF500", fg="#7F14B7", font=("Industry-Black", 9, "bold")
+    ).pack(side="left", padx=5)
+
+    tk.Button(
+        frame_botoes_extra, text="Buscar outro momento da live", command=buscar_outro_timestamp,
+        bg="#FEF500", fg="#7F14B7", font=("Industry-Black", 9, "bold")
+    ).pack(side="left", padx=5)
+
+    janela.wait_window()  # bloqueia até a janela fechar, aí devolve o resultado
+
+    return resultado["caminho"]
+
+
 def gerar_thumbnail_para_capitulo(title, seg):
     """
     Gera a thumbnail completa (fundo removido do host, layout, texto,
     .psd editável) pra UM capítulo específico do checklist. Reaproveita
-    o vídeo já resolvido, extrai um frame do host alguns segundos
-    depois do início do corte, e pede a imagem sugerida (isso continua
-    escolha manual sua — não dá pra confiar busca automática de
-    imagem).
+    o vídeo já resolvido, abre o seletor visual de frame do host
+    (miniaturas candidatas dentro da duração do corte, com opção de
+    arquivo manual ou buscar outro momento da live), e pede a imagem
+    sugerida (isso continua escolha manual sua — não dá pra confiar
+    busca automática de imagem).
 
     Se esse capítulo tiver metadata gerado pela IA (veio de "Gerar
     capítulos automaticamente"), usa o texto de thumbnail que ela já
@@ -797,36 +1068,38 @@ def gerar_thumbnail_para_capitulo(title, seg):
         texto_base = dados_ia.get("titulo") or title
         linha1, linha2 = dividir_texto_thumbnail(texto_base)
 
-    inicio_dt = datetime.strptime(seg["start"], "%H:%M:%S")
-    timestamp_frame = (inicio_dt + timedelta(seconds=5)).strftime("%H:%M:%S")
-
-    os.makedirs(PASTA_SAIDA_THUMBNAILS, exist_ok=True)
-    caminho_frame_bruto = os.path.join(PASTA_SAIDA_THUMBNAILS, f"{title}_frame_bruto.jpg")
-
-    txt_saida.insert(tk.END, f"Extraindo frame do host pra \"{title}\"...\n")
-    txt_saida.see(tk.END)
-    tela.update_idletasks()
-
-    cmd_frame = ["ffmpeg", "-y", "-ss", timestamp_frame, "-i", path, "-frames:v", "1", caminho_frame_bruto]
-    resultado_ffmpeg = subprocess.run(cmd_frame, capture_output=True, text=True)
-    if resultado_ffmpeg.returncode != 0:
-        messagebox.showerror("Erro", f"Falha ao extrair frame do vídeo:\n{resultado_ffmpeg.stderr[-300:]}")
+    caminho_frame_bruto = selecionar_frame_host(seg, titulo_janela=f"Escolher frame do host — {title}")
+    if not caminho_frame_bruto:
         return
 
     txt_saida.insert(tk.END, f"Gerando thumbnail pra \"{title}\" (pode demorar, o Photoshop vai abrir)...\n")
     txt_saida.see(tk.END)
     tela.update_idletasks()
 
-    resultado_thumb = montar_thumbnail_completa(
-        CAMINHO_TEMPLATE_THUMBNAIL,
-        caminho_frame_bruto,
-        caminho_imagem_sugerida,
-        linha1,
-        linha2,
-        PASTA_SAIDA_THUMBNAILS,
-        title,
-        lado_forcado=LADO_THUMBNAIL_PADRAO,
-    )
+    try:
+        resultado_thumb = montar_thumbnail_completa(
+            CAMINHO_TEMPLATE_THUMBNAIL,
+            caminho_frame_bruto,
+            caminho_imagem_sugerida,
+            linha1,
+            linha2,
+            PASTA_SAIDA_THUMBNAILS,
+            title,
+            lado_forcado=LADO_THUMBNAIL_PADRAO,
+        )
+    except Exception as e:
+        # Qualquer erro inesperado (Photoshop travado, arquivo em uso,
+        # etc.) cai aqui em vez de um traceback cru — o programa
+        # continua rodando normalmente, só essa thumbnail específica
+        # falhou.
+        txt_saida.insert(tk.END, f"[ERRO INESPERADO] Falha ao gerar thumbnail de \"{title}\": {e}\n")
+        txt_saida.see(tk.END)
+        messagebox.showerror(
+            "Erro ao gerar thumbnail",
+            f"Algo deu errado gerando a thumbnail de \"{title}\":\n\n{e}\n\n"
+            "O programa continua funcionando normalmente — só essa thumbnail não foi gerada."
+        )
+        return
 
     if resultado_thumb:
         txt_saida.insert(tk.END, f"Thumbnail pronta: {resultado_thumb}\n")

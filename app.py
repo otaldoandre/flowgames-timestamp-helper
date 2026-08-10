@@ -33,6 +33,12 @@ capitulos_vars = {}
 # thumbnail) indexados por título de capítulo para referência futura
 metadata_ia = {}
 
+# Guarda a transcrição selecionada uma vez, pra não pedir de novo a
+# cada capítulo — só reseta fechando e abrindo o programa (ou trocando
+# na função reset se você adicionar isso depois)
+caminho_transcricao_atual = None
+blocos_transcricao_atual = None
+
 def get_clean_title(title):
     #Remove acentos
     title = unicodedata.normalize("NFD", title)
@@ -604,8 +610,9 @@ def obter_metadata_ia_do_capitulo(title, seg):
     Devolve o metadata da IA (quote, texto de thumbnail, título) pra
     esse capítulo. Se já tiver sido gerado (via "Gerar capítulos
     automaticamente"), usa o que já tá guardado. Senão, pergunta a
-    transcrição e gera na hora — assim funciona mesmo quando os
-    timestamps foram colados manualmente.
+    transcrição — só na PRIMEIRA vez da sessão, reaproveita depois — e
+    gera na hora, assim funciona mesmo quando os timestamps foram
+    colados manualmente.
     """
     dados_ia = metadata_ia.get(title)
     if dados_ia is not None:
@@ -614,19 +621,24 @@ def obter_metadata_ia_do_capitulo(title, seg):
     gerar_agora = messagebox.askyesno(
         "Sugestão de texto pela IA",
         f"Esse capítulo (\"{title}\") ainda não tem sugestão de texto da IA.\n\n"
-        "Quer selecionar a transcrição do episódio pra gerar agora?"
+        "Quer gerar agora?"
     )
     if not gerar_agora:
         return {}
 
-    caminho_transcricao = filedialog.askopenfilename(
-        title="Selecione a transcrição do episódio",
-        filetypes=[("Arquivos de texto", "*.txt")]
-    )
-    if not caminho_transcricao:
-        return {}
+    global caminho_transcricao_atual, blocos_transcricao_atual
 
-    blocos = carregar_transcricao_ia(caminho_transcricao)
+    if not caminho_transcricao_atual:
+        caminho_selecionado = filedialog.askopenfilename(
+            title="Selecione a transcrição do episódio",
+            filetypes=[("Arquivos de texto", "*.txt")]
+        )
+        if not caminho_selecionado:
+            return {}
+        caminho_transcricao_atual = caminho_selecionado
+        blocos_transcricao_atual = carregar_transcricao_ia(caminho_transcricao_atual)
+
+    blocos = blocos_transcricao_atual
 
     inicio_dt = datetime.strptime(seg["start"], "%H:%M:%S")
     inicio_segundos = inicio_dt.hour * 3600 + inicio_dt.minute * 60 + inicio_dt.second
@@ -639,7 +651,14 @@ def obter_metadata_ia_do_capitulo(title, seg):
 
     texto = " ".join(b["text"] for b in blocos if inicio_segundos <= b["seconds"] < fim_segundos)
     if not texto.strip():
-        messagebox.showinfo("Aviso", "Não achei texto da transcrição nesse intervalo de tempo.")
+        maior_timestamp = max((b["seconds"] for b in blocos), default=0)
+        messagebox.showinfo(
+            "Aviso",
+            f"Não achei texto da transcrição entre {seg['start']} e {seg['end'] or '(fim)'}.\n\n"
+            f"A transcrição carregada ({os.path.basename(caminho_transcricao_atual)}) vai até "
+            f"{maior_timestamp // 3600:02d}:{(maior_timestamp % 3600) // 60:02d}:{maior_timestamp % 60:02d} "
+            f"— confere se é a transcrição do episódio certo pra esse capítulo."
+        )
         return {}
 
     txt_saida.insert(tk.END, f"Gerando sugestão de texto com IA pra \"{title}\"...\n")

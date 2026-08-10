@@ -444,6 +444,91 @@ def resolver_video():
             salvar_estado_projeto()
 
 
+def extrair_video_id_youtube(url):
+    """Extrai o video_id de várias formas de link do YouTube (watch, youtu.be, live)."""
+    padrao = re.search(r'(?:youtu\.be/|youtube\.com/(?:watch\?v=|live/|embed/))([a-zA-Z0-9_-]{11})', url)
+    return padrao.group(1) if padrao else None
+
+
+def baixar_transcricao_youtube():
+    """
+    Baixa a transcrição do vídeo do YouTube linkado na mesma caixa de
+    link usada pra baixar o vídeo — reaproveita o mesmo campo (é a
+    mesma live nos dois casos), mas só LÊ o valor, nunca escreve nada
+    nele, então não interfere com "Baixar / Selecionar vídeo".
+
+    Salva no mesmo formato [MM:SS] que o resto do pipeline já usa, e
+    define como a transcrição atual do projeto (igual selecionar
+    manualmente faria).
+    """
+    global caminho_transcricao_atual, blocos_transcricao_atual
+
+    url = youtube_link_var.get().strip()
+    if not url:
+        messagebox.showerror(
+            "Erro",
+            "Cola o link do YouTube na caixa acima primeiro (mesma caixa usada pra baixar o vídeo)."
+        )
+        return
+
+    video_id = extrair_video_id_youtube(url)
+    if not video_id:
+        messagebox.showerror("Erro", "Não consegui identificar o ID do vídeo nesse link.")
+        return
+
+    try:
+        from youtube_transcript_api import YouTubeTranscriptApi
+    except ImportError:
+        messagebox.showerror(
+            "Erro",
+            "A biblioteca youtube_transcript_api não está instalada.\n"
+            "Instale com: pip install youtube-transcript-api"
+        )
+        return
+
+    txt_saida.insert(tk.END, "Baixando transcrição do YouTube, aguarde...\n")
+    txt_saida.see(tk.END)
+    tela.update_idletasks()
+
+    try:
+        api = YouTubeTranscriptApi()
+        transcricao = api.fetch(video_id, languages=["pt"])
+    except Exception as e:
+        # A causa mais comum, de longe: legenda automática ainda não foi
+        # gerada — o YouTube demora (às vezes bastante) pra disponibilizar
+        # a legenda de lives grandes logo depois que elas terminam
+        messagebox.showwarning(
+            "Transcrição indisponível",
+            "Não consegui baixar a transcrição desse vídeo agora.\n\n"
+            "Isso é comum logo depois de uma live grande terminar — o "
+            "YouTube pode levar um tempo pra gerar a legenda automática. "
+            "Tenta de novo daqui a pouco.\n\n"
+            f"Detalhe técnico: {e}"
+        )
+        txt_saida.insert(tk.END, f"[ERRO] Falha ao baixar transcrição: {e}\n")
+        txt_saida.see(tk.END)
+        return
+
+    pasta_destino = PASTA_PROJETO_ATUAL or os.path.dirname(os.path.abspath(__file__))
+    caminho_arquivo = os.path.join(pasta_destino, f"transcricao_{video_id}.txt")
+
+    with open(caminho_arquivo, "w", encoding="utf-8") as arquivo:
+        for bloco in transcricao:
+            minutos = int(bloco.start // 60)
+            segundos = int(bloco.start % 60)
+            texto_limpo = bloco.text.replace("\n", " ").strip()
+            arquivo.write(f"[{minutos:02d}:{segundos:02d}] {texto_limpo}\n")
+
+    caminho_transcricao_atual = caminho_arquivo
+    blocos_transcricao_atual = carregar_transcricao_ia(caminho_arquivo)
+    caminho_transcricao_var.set(caminho_arquivo)
+    salvar_estado_projeto()
+
+    txt_saida.insert(tk.END, f"Transcrição baixada e salva em: {caminho_arquivo}\n")
+    txt_saida.see(tk.END)
+    messagebox.showinfo("Transcrição", "Transcrição baixada com sucesso!")
+
+
 def selecionar_transcricao_manual():
     """
     Seleciona a transcrição do episódio explicitamente (em vez de só
@@ -1749,6 +1834,16 @@ btn_selecionar_transcricao = tk.Button(
     font=("Industry-Black", 10, "bold")
 )
 btn_selecionar_transcricao.pack(side="left", padx=5)
+
+btn_baixar_transcricao = tk.Button(
+    frame_transcricao,
+    text="Baixar Transcrição do YouTube",
+    command=baixar_transcricao_youtube,
+    bg="#FEF500",
+    fg="#7F14B7",
+    font=("Industry-Black", 10, "bold")
+)
+btn_baixar_transcricao.pack(side="left", padx=5)
 
 lbl_transcricao = tk.Label(
     frame_transcricao,

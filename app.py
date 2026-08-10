@@ -13,6 +13,10 @@ from detectar_capitulos import detectar_capitulos, carregar_transcricao as carre
 from gerar_metadata_capitulo import carregar_json, selecionar_exemplos_few_shot, avaliar_capitulo
 from pipeline_thumbnail import montar_thumbnail_completa
 
+from dotenv import load_dotenv
+caminho_env = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".env")
+load_dotenv(caminho_env)
+
 LOGO_PADRAO_PATH = r"C:\Users\andre\Downloads\TEMPLATE\TEMPLATE\logo.png"
 
 # Caminho do dataset de treino para referência de metadados

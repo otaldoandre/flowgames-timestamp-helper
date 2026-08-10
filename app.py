@@ -409,6 +409,9 @@ def resolver_video():
     de seleção de arquivo local, e guarda o resultado em video_path_var —
     tanto "Criar cortes" quanto "Criar preview" reaproveitam esse mesmo
     vídeo em vez de baixar/selecionar de novo a cada ação.
+
+    Se um projeto estiver ativo, o download vai direto pra pasta dele —
+    só pergunta a pasta se não tiver nenhum projeto aberto.
     """
     youtube_url = youtube_link_var.get().strip()
 
@@ -422,12 +425,16 @@ def resolver_video():
             )
             return
 
-        download_dir = filedialog.askdirectory(
-            title="Selecione a pasta onde o vídeo baixado será salvo"
-        )
-        if not download_dir:
-            messagebox.showerror("Erro", "Nenhuma pasta selecionada! Tente novamente.")
-            return
+        if PASTA_PROJETO_ATUAL:
+            # Projeto ativo já tem lugar certo pra isso — não precisa perguntar
+            download_dir = PASTA_PROJETO_ATUAL
+        else:
+            download_dir = filedialog.askdirectory(
+                title="Selecione a pasta onde o vídeo baixado será salvo"
+            )
+            if not download_dir:
+                messagebox.showerror("Erro", "Nenhuma pasta selecionada! Tente novamente.")
+                return
 
         filepath = download_youtube_video(youtube_url, download_dir)
         if filepath:

@@ -425,7 +425,7 @@ def caminho_estado_projeto(pasta_projeto):
 
 
 def salvar_estado_projeto():
-    """Salva o texto de timestamps colado, o estado das checkboxes, o vídeo e a transcrição do projeto atual."""
+    """Salva o texto de timestamps colado, o estado das checkboxes, o vídeo, a transcrição e o metadata da IA do projeto atual."""
     if not PASTA_PROJETO_ATUAL:
         return
 
@@ -438,6 +438,7 @@ def salvar_estado_projeto():
         "capitulos": estado_capitulos,
         "video_path": video_path_var.get(),
         "caminho_transcricao": caminho_transcricao_atual or "",
+        "metadata_ia": metadata_ia,
     }
 
     try:
@@ -701,6 +702,8 @@ def abrir_projeto_selecionado():
     if estado:
         txt_entrada.delete("1.0", tk.END)
         txt_entrada.insert("1.0", estado.get("texto_timestamps", "").strip())
+
+        metadata_ia.update(estado.get("metadata_ia", {}))
 
         video_path_salvo = estado.get("video_path", "")
         if video_path_salvo:
@@ -1516,14 +1519,25 @@ def select_endslate():
         endslate_path_var.set(file_path)
 
 
+def obter_pasta_preview_atual():
+    """
+    Pasta onde os previews do projeto atual ficam — deriva da pasta do
+    projeto (sempre a mesma, previsível: <projeto>/preview/) em vez de
+    depender só de ultima_pasta_preview_var, que só existe na memória
+    da sessão atual e some ao reabrir o programa ou trocar de projeto,
+    mesmo os arquivos continuando no disco.
+    """
+    if PASTA_PROJETO_ATUAL:
+        return os.path.join(PASTA_PROJETO_ATUAL, "preview")
+    return ultima_pasta_preview_var.get()
+
+
 def abrir_preview_capitulo(title, parte):
     """
     Abre o arquivo de preview de uma parte específica desse capítulo
-    ("start" ou "end") no player padrão do Windows (os.startfile). Só
-    funciona depois de rodar "Criar preview de cortes" pelo menos uma vez
-    na sessão atual.
+    ("start" ou "end") no player padrão do Windows (os.startfile).
     """
-    pasta = ultima_pasta_preview_var.get()
+    pasta = obter_pasta_preview_atual()
     if not pasta:
         messagebox.showinfo(
             "Preview",
@@ -1599,6 +1613,7 @@ def obter_metadata_ia_do_capitulo(title, seg):
 
     if dados_ia:
         metadata_ia[title] = dados_ia
+        salvar_estado_projeto()
         return dados_ia
 
     return {}
@@ -2329,6 +2344,7 @@ def gerar_capitulos_automaticamente():
         "\nCapítulos gerados! Clique em \"Carregar capítulos\" pra montar a lista de corte/preview.\n"
     )
     txt_saida.see(tk.END)
+    salvar_estado_projeto()
 
 
 # Configuração da interface

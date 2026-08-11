@@ -979,14 +979,61 @@ def baixar_transcricao_youtube():
     messagebox.showinfo("Transcrição", "Transcrição baixada com sucesso!")
 
 
+def encontrar_janela_explorer_aberta(caminho_pasta):
+    """
+    Procura entre as janelas do Explorer já abertas se alguma está
+    mostrando exatamente essa pasta. Devolve o objeto da janela (tem
+    um .HWND, usado pra trazer ela pra frente) se achar, ou None.
+
+    Usa a API de Shell do Windows via COM — se falhar por qualquer
+    motivo (versão do Windows, permissão, etc.), devolve None e
+    abrir_pasta_projeto() cai no comportamento simples de sempre
+    (os.startfile), sem quebrar a funcionalidade básica.
+    """
+    try:
+        import win32com.client
+        shell = win32com.client.Dispatch("Shell.Application")
+    except Exception:
+        return None
+
+    caminho_alvo = os.path.normcase(os.path.normpath(caminho_pasta))
+
+    try:
+        for janela in shell.Windows():
+            try:
+                caminho_janela = janela.Document.Folder.Self.Path
+            except Exception:
+                continue
+            if os.path.normcase(os.path.normpath(caminho_janela)) == caminho_alvo:
+                return janela
+    except Exception:
+        pass
+
+    return None
+
+
 def abrir_pasta_projeto():
-    """Abre a pasta do projeto atual no Explorer do Windows."""
+    """
+    Abre a pasta do projeto atual no Explorer — se já tiver uma janela
+    aberta mostrando ela, só traz pra frente em vez de abrir outra
+    (evita encher a tela de janelas duplicadas da mesma pasta).
+    """
     if not PASTA_PROJETO_ATUAL:
         messagebox.showinfo("Aviso", "Nenhum projeto aberto.")
         return
     if not os.path.isdir(PASTA_PROJETO_ATUAL):
         messagebox.showerror("Erro", "A pasta do projeto não existe mais.")
         return
+
+    janela_existente = encontrar_janela_explorer_aberta(PASTA_PROJETO_ATUAL)
+    if janela_existente:
+        try:
+            import win32gui
+            win32gui.SetForegroundWindow(janela_existente.HWND)
+            return
+        except Exception:
+            pass  # não conseguiu focar — cai no comportamento padrão abaixo
+
     os.startfile(PASTA_PROJETO_ATUAL)
 
 

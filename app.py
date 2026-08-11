@@ -9,11 +9,29 @@ import os
 import json
 import subprocess
 import shutil
+import sys
 
 
 from dotenv import load_dotenv
 caminho_env = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".env")
 load_dotenv(caminho_env)
+
+# Restringe o acesso a e-mails @flowgames.gg — checa ANTES de montar
+# qualquer coisa da interface. Se negar (domínio errado ou login
+# cancelado), fecha o programa aqui mesmo.
+from auth_google import autenticar_usuario
+
+_email_autenticado = autenticar_usuario()
+if not _email_autenticado:
+    _tela_login = tk.Tk()
+    _tela_login.withdraw()
+    messagebox.showerror(
+        "Acesso negado",
+        "Login necessário com uma conta @flowgames.gg.\n"
+        "Feche e tente novamente com a conta certa."
+    )
+    _tela_login.destroy()
+    sys.exit(1)
 
 from detectar_capitulos import detectar_capitulos, carregar_transcricao as carregar_transcricao_ia
 from gerar_metadata_capitulo import carregar_json, selecionar_exemplos_few_shot, avaliar_capitulo

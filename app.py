@@ -1086,7 +1086,7 @@ def _gerar_cortes_worker(path, segments, enable_fade_in, enable_fade_out, enable
         if not needs_render:
             if end:
                 cmd = (
-                    f'ffmpeg -ss {start} '
+                    f'ffmpeg -y -ss {start} '
                     f'-i "{path}" '
                     f'-t {duration_str} '
                     f'-c copy '
@@ -1095,7 +1095,7 @@ def _gerar_cortes_worker(path, segments, enable_fade_in, enable_fade_out, enable
             else:
 
                 cmd = (
-                    f'ffmpeg -ss {start} '
+                    f'ffmpeg -y -ss {start} '
                     f'-i "{path}" '
                     f'-c copy '
                     f'"{title}.mp4"'
@@ -1164,7 +1164,7 @@ def _gerar_cortes_worker(path, segments, enable_fade_in, enable_fade_out, enable
             ## Render
             if end:
                 cmd_render = (
-                    f'ffmpeg '
+                    f'ffmpeg -y '
                     f'-ss {start} '
                     f'-i "{path}" '
                     f'{input_logo} '
@@ -1181,7 +1181,7 @@ def _gerar_cortes_worker(path, segments, enable_fade_in, enable_fade_out, enable
 
             else:
                 cmd_render = (
-                    f'ffmpeg '
+                    f'ffmpeg -y '
                     f'-ss {start} '
                     f'-i "{path}" '
                     f'{input_logo} '
@@ -1199,7 +1199,7 @@ def _gerar_cortes_worker(path, segments, enable_fade_in, enable_fade_out, enable
                 final_output = f"{title}.mp4"
 
                 cmd_finalize = (
-                    f'ffmpeg '
+                    f'ffmpeg -y '
                     f'-i "{temp_output}" '
                     f'-c copy '
                     f'"{final_output}"'
@@ -1216,7 +1216,7 @@ def _gerar_cortes_worker(path, segments, enable_fade_in, enable_fade_out, enable
                 final_output = f"{title}.mp4"
 
                 cmd_concat = (
-                    f'ffmpeg '
+                    f'ffmpeg -y '
                     f'-i "{temp_output}" '
                     f'-i "{endslate_path}" '
                     f'-filter_complex '
@@ -1351,7 +1351,7 @@ def _gerar_previews_worker(path, segments, widgets_progresso):
             duration_str = f"{hours:02}:{minutes:02}:{seconds:02}"
             #Start
             cmd_start_preview = (
-                f'ffmpeg -ss {start} -i "{path}" '
+                f'ffmpeg -y -ss {start} -i "{path}" '
                 f'-t 5 -c copy "{title}_preview_start.mp4"'
             )
 
@@ -1361,7 +1361,7 @@ def _gerar_previews_worker(path, segments, widgets_progresso):
             valid_end = end_dt - preview_duration
             valid_end_str = valid_end.strftime("%H:%M:%S")
             cmd_end_preview = (
-                f'ffmpeg -ss {valid_end_str} -i "{path}" '
+                f'ffmpeg -y -ss {valid_end_str} -i "{path}" '
                 f'-t 5 -c copy "{title}_preview_end.mp4"'
             )
             caminho_fim = os.path.join(pasta_preview_atual, f"{title}_preview_end.mp4")
@@ -1369,7 +1369,7 @@ def _gerar_previews_worker(path, segments, widgets_progresso):
         else:
             # Possible feature: add an end preview to the last clip with ffprobe (we need to find the duration of the
             # whole video to do that)
-            cmd_start_preview = (f'ffmpeg -i {path} -ss {start} -to {valid_start}'
+            cmd_start_preview = (f'ffmpeg -y -i {path} -ss {start} -to {valid_start}'
                                  f' -c copy "{title}_preview_start.mp4"')
             cmd_end_preview = None
 

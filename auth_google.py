@@ -20,13 +20,21 @@ Uso:
 """
 
 import os
+import sys
 
 import requests
 from google.auth.transport.requests import Request
 from google.oauth2.credentials import Credentials
 from google_auth_oauthlib.flow import InstalledAppFlow
 
-PASTA_ATUAL = os.path.dirname(os.path.abspath(__file__))
+# Mesma lógica do app.py: __file__ aponta pra uma pasta temporária
+# quando rodando como .exe empacotado (PyInstaller), não pra pasta
+# real do .exe — sem essa checagem, client_secret.json/token.json
+# nunca seriam encontrados, e o login teria que ser refeito toda vez.
+if getattr(sys, "frozen", False):
+    PASTA_ATUAL = os.path.dirname(sys.executable)
+else:
+    PASTA_ATUAL = os.path.dirname(os.path.abspath(__file__))
 
 # Baixado do Google Cloud Console (Clientes > Cliente de computador 1 >
 # baixar JSON) — precisa estar na mesma pasta que esse arquivo, com

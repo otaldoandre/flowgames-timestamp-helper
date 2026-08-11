@@ -379,6 +379,15 @@ def abrir_projeto_selecionado():
         widget.destroy()
     capitulos_vars.clear()
 
+    # Limpa vídeo/transcrição do projeto ANTERIOR antes de tentar
+    # restaurar o que o projeto novo tiver — sem isso, um projeto que
+    # não tem vídeo/transcrição salvo ainda ficava com o do projeto de
+    # onde você veio, por engano.
+    video_path_var.set("")
+    caminho_transcricao_var.set("Nenhuma transcrição selecionada")
+    caminho_transcricao_atual = None
+    blocos_transcricao_atual = None
+
     estado = carregar_estado_projeto(pasta)
     if estado:
         txt_entrada.delete("1.0", tk.END)

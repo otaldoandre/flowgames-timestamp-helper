@@ -12,8 +12,27 @@ import shutil
 import sys
 
 
+def obter_pasta_base():
+    """
+    Pasta onde os arquivos "ao lado do programa" devem ficar (.env,
+    _projetos.json, arquivos temporários de frame, etc.).
+
+    Precisa ser tratada diferente quando rodando como .exe empacotado
+    (PyInstaller) — nesse caso, __file__ aponta pra uma pasta TEMPORÁRIA
+    que o Windows cria do zero a cada execução e apaga depois, não pra
+    pasta real onde o .exe está. Usar __file__ direto nesse caso faria
+    o .env nunca ser encontrado, e qualquer coisa "salva ao lado do
+    programa" (como o registro de projetos) sumir toda vez que fechasse.
+    """
+    if getattr(sys, "frozen", False):
+        return os.path.dirname(sys.executable)
+    return os.path.dirname(os.path.abspath(__file__))
+
+
+PASTA_BASE = obter_pasta_base()
+
 from dotenv import load_dotenv
-caminho_env = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".env")
+caminho_env = os.path.join(PASTA_BASE, ".env")
 load_dotenv(caminho_env)
 
 # Restringe o acesso a e-mails @flowgames.gg — checa ANTES de montar
@@ -38,14 +57,34 @@ from gerar_metadata_capitulo import carregar_json, selecionar_exemplos_few_shot,
 from pipeline_thumbnail import montar_thumbnail_completa
 from PIL import Image, ImageTk
 
-LOGO_PADRAO_PATH = r"C:\Users\andre\Downloads\TEMPLATE\TEMPLATE\logo.png"
+# Caminhos específicos da máquina — vêm do .env, não hardcoded, porque
+# são diferentes em qualquer PC que não seja o meu (inclusive o do
+# colega que vai rodar o .exe). LOGO_PADRAO_PATH tem um botão de
+# override na UI ("Selecionar Logo"), os outros três não têm nenhum
+# fallback — se faltarem, quebram silenciosamente lá na frente, então
+# checa e avisa aqui, no início.
+LOGO_PADRAO_PATH = os.environ.get("LOGO_PADRAO_PATH", "")
+CAMINHO_TREINO_IA = os.environ.get("CAMINHO_TREINO_IA", "")
+CAMINHO_TEMPLATE_THUMBNAIL = os.environ.get("CAMINHO_TEMPLATE_THUMBNAIL", "")
+PASTA_SAIDA_THUMBNAILS = os.environ.get("PASTA_SAIDA_THUMBNAILS", "")
 
-# Caminho do dataset de treino para referência de metadados
-CAMINHO_TREINO_IA = r"C:\Users\andre\Downloads\projetos\flowgames-timestamp-helper\scripts\dados_cortes_flow_games\fase2_treino.json"
-
-# Template de thumbnail e pasta de saída — ajusta esses dois caminhos
-CAMINHO_TEMPLATE_THUMBNAIL = r"C:\Users\andre\Downloads\projetos\flowgames-timestamp-helper\thumb_corte_template.psd"
-PASTA_SAIDA_THUMBNAILS = r"C:\Users\andre\Downloads\projetos\flowgames-timestamp-helper\thumbnails"
+_caminhos_obrigatorios = {
+    "CAMINHO_TREINO_IA": CAMINHO_TREINO_IA,
+    "CAMINHO_TEMPLATE_THUMBNAIL": CAMINHO_TEMPLATE_THUMBNAIL,
+    "PASTA_SAIDA_THUMBNAILS": PASTA_SAIDA_THUMBNAILS,
+}
+_caminhos_faltando = [nome for nome, valor in _caminhos_obrigatorios.items() if not valor]
+if _caminhos_faltando:
+    _tela_erro_config = tk.Tk()
+    _tela_erro_config.withdraw()
+    messagebox.showerror(
+        "Configuração incompleta",
+        "Faltam essas variáveis no .env (mesma pasta do app.py):\n\n"
+        + "\n".join(_caminhos_faltando)
+        + "\n\nAdiciona elas no .env antes de rodar o programa."
+    )
+    _tela_erro_config.destroy()
+    sys.exit(1)
 
 # Detecção automática de lado (esquerda/direita do host) ainda não é
 # confiável nos frames reais — força um lado fixo aqui até isso
@@ -78,7 +117,7 @@ PASTA_PROJETO_ATUAL = None
 # Registro de todos os projetos já criados (nome, pasta, última vez
 # aberto) — fica ao lado do app.py, não da pasta atual de trabalho, pra
 # sempre ser encontrado independente de onde o programa é executado.
-CAMINHO_REGISTRO_PROJETOS = os.path.join(os.path.dirname(os.path.abspath(__file__)), "_projetos.json")
+CAMINHO_REGISTRO_PROJETOS = os.path.join(PASTA_BASE, "_projetos.json")
 
 
 def carregar_registro_projetos():
@@ -647,7 +686,7 @@ def baixar_transcricao_youtube():
         txt_saida.see(tk.END)
         return
 
-    pasta_destino = PASTA_PROJETO_ATUAL or os.path.dirname(os.path.abspath(__file__))
+    pasta_destino = PASTA_PROJETO_ATUAL or PASTA_BASE
     caminho_arquivo = os.path.join(pasta_destino, f"transcricao_{video_id}.txt")
 
     with open(caminho_arquivo, "w", encoding="utf-8") as arquivo:
@@ -1303,7 +1342,7 @@ def abrir_scrubber_live(titulo_janela="Escolher frame da live", seg_atual=None):
         )
 
     resultado = {"caminho": None}
-    caminho_preview = os.path.join(os.path.dirname(os.path.abspath(__file__)), "_frame_scrubber_live.jpg")
+    caminho_preview = os.path.join(PASTA_BASE, "_frame_scrubber_live.jpg")
 
     janela = tk.Toplevel(tela)
     janela.title(titulo_janela)
@@ -1441,7 +1480,7 @@ def selecionar_frame_host(seg, titulo_janela="Selecionar frame do host"):
     n_candidatos = min(6, max(2, duracao // 5))
     passo = duracao / n_candidatos
 
-    pasta_temp = os.path.join(os.path.dirname(os.path.abspath(__file__)), "_frames_candidatos")
+    pasta_temp = os.path.join(PASTA_BASE, "_frames_candidatos")
     os.makedirs(pasta_temp, exist_ok=True)
 
     caminhos_candidatos = []
@@ -2151,7 +2190,7 @@ def abrir_posicionador_logo():
     if not timestamp_frame:
         return
 
-    caminho_frame = os.path.join(os.path.dirname(os.path.abspath(__file__)), "_frame_preview_logo.jpg")
+    caminho_frame = os.path.join(PASTA_BASE, "_frame_preview_logo.jpg")
     resultado_ffmpeg = subprocess.run(
         ["ffmpeg", "-y", "-ss", timestamp_frame, "-i", path, "-frames:v", "1", caminho_frame],
         capture_output=True, text=True

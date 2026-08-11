@@ -105,6 +105,7 @@ def _iniciar_operacao_longa():
         messagebox.showinfo("Aguarde", "Já tem uma operação rodando — espera terminar antes de iniciar outra.")
         return False
     _operacao_longa_ativa["valor"] = True
+    _cancelar_geracao["solicitado"] = False
     btn_criar_cortes.config(state="disabled")
     btn_criar_previews.config(state="disabled")
     return True
@@ -115,6 +116,197 @@ def _finalizar_operacao_longa():
     _operacao_longa_ativa["valor"] = False
     btn_criar_cortes.config(state="normal")
     btn_criar_previews.config(state="normal")
+
+
+# Estado do cancelamento — compartilhado entre geração de cortes e de
+# previews, já que só uma operação roda por vez (ver _operacao_longa_ativa)
+_cancelar_geracao = {"solicitado": False}
+_processo_ffmpeg_atual = {"proc": None}
+
+
+def cancelar_geracao():
+    """
+    Chamado pelo botão "Cancelar" — pede confirmação primeiro, depois
+    mata o processo ffmpeg em execução NA HORA (não espera ele
+    terminar sozinho), e marca pra parar antes de começar o próximo
+    corte/preview da lista.
+    """
+    if not messagebox.askyesno(
+        "Cancelar geração",
+        "Tem certeza que quer cancelar?\n\n"
+        "Os cortes já feitos até agora continuam salvos — no final você "
+        "escolhe se quer manter ou apagar eles."
+    ):
+        return
+
+    _cancelar_geracao["solicitado"] = True
+
+    proc = _processo_ffmpeg_atual["proc"]
+    if proc and proc.poll() is None:  # ainda rodando
+        try:
+            proc.terminate()
+            if os.name == "nt":
+                # No Windows, terminate() sozinho às vezes não mata os
+                # processos filhos que o shell=True criou (o comando
+                # atual pode ter "&&" encadeando várias chamadas de
+                # ffmpeg) — taskkill com /T garante a árvore inteira
+                subprocess.run(
+                    ["taskkill", "/F", "/T", "/PID", str(proc.pid)],
+                    capture_output=True
+                )
+        except Exception:
+            pass
+
+    txt_saida.insert(tk.END, "Cancelamento solicitado — parando após o passo atual...\n")
+    txt_saida.see(tk.END)
+
+
+def executar_comando_cancelavel(cmd):
+    """
+    Roda um comando (string de shell, pode ter '&&' encadeado, igual
+    os comandos montados nesse arquivo) via Popen em vez de
+    os.system() — isso dá um handle real do processo, que
+    cancelar_geracao() consegue matar de verdade no meio da execução,
+    e devolve o código de saída de verdade (os.system() não checava
+    isso, então uma falha do ffmpeg aparecia como "Completo" na tela).
+    """
+    processo = subprocess.Popen(cmd, shell=True)
+    _processo_ffmpeg_atual["proc"] = processo
+    processo.wait()
+    _processo_ffmpeg_atual["proc"] = None
+    return processo.returncode
+
+
+def tocar_som_conclusao():
+    """Som simples ao terminar uma geração — sinaliza sem precisar olhar pra tela."""
+    try:
+        import winsound
+        winsound.MessageBeep(winsound.MB_ICONASTERISK)
+    except Exception:
+        pass  # ambiente sem som/winsound (ex: fora do Windows) — não trava nada
+
+
+def abrir_janela_progresso(titulo, total_segments):
+    """
+    Janela de progresso mostrada IMEDIATAMENTE ao clicar em "Criar
+    cortes"/"Criar preview" — antes, não tinha nenhum feedback visível
+    até o primeiro corte terminar, o que parecia que o clique não tinha
+    feito nada. O botão Cancelar mora aqui dentro agora.
+    """
+    janela = tk.Toplevel(tela)
+    janela.title(titulo)
+    janela.configure(bg="#7F14B7")
+    janela.geometry("420x220")
+    janela.protocol("WM_DELETE_WINDOW", lambda: None)  # só fecha via Cancelar ou ao terminar
+
+    tk.Label(
+        janela, text=titulo, bg="#7F14B7", fg="#FEF500", font=("Industry-Black", 12, "bold")
+    ).pack(pady=(15, 5))
+
+    lbl_posicao = tk.Label(
+        janela, text=f"0 de {total_segments}", bg="#7F14B7", fg="#FFFFFF", font=("Industry-Black", 10)
+    )
+    lbl_posicao.pack(pady=2)
+
+    barra = Progressbar(janela, orient="horizontal", length=350, maximum=100)
+    barra.pack(pady=8)
+
+    lbl_status = tk.Label(
+        janela, text=f"✓ 0 concluído(s)    ⏳ 0 em andamento    ○ {total_segments} pendente(s)",
+        bg="#7F14B7", fg="#FFFFFF", font=("Industry-Black", 9)
+    )
+    lbl_status.pack(pady=5)
+
+    tk.Button(
+        janela, text="Cancelar", command=cancelar_geracao,
+        bg="#FFFFFF", fg="#7F14B7", font=("Industry-Black", 10, "bold")
+    ).pack(pady=10)
+
+    return {"janela": janela, "lbl_posicao": lbl_posicao, "barra": barra, "lbl_status": lbl_status, "total": total_segments}
+
+
+def atualizar_janela_progresso(widgets, concluidos, em_andamento):
+    """Chamado via tela.after(0, ...) pela thread de trabalho — atualiza os números da janela de progresso."""
+    if not widgets["janela"].winfo_exists():
+        return
+    total = widgets["total"]
+    pendentes = max(0, total - concluidos - em_andamento)
+
+    widgets["lbl_posicao"].config(text=f"{concluidos + em_andamento} de {total}")
+    widgets["barra"].config(value=((concluidos + em_andamento) / total) * 100 if total else 0)
+    widgets["lbl_status"].config(
+        text=f"✓ {concluidos} concluído(s)    ⏳ {em_andamento} em andamento    ○ {pendentes} pendente(s)"
+    )
+
+
+def fechar_janela_progresso(widgets):
+    if widgets["janela"].winfo_exists():
+        widgets["janela"].destroy()
+
+
+def mostrar_resultado_geracao(titulo_janela, resultados, foi_cancelado):
+    """
+    Mostra o resultado final de uma geração (cortes ou previews) — o
+    que deu certo, o que falhou, o que foi cancelado antes de rodar.
+    Se cancelou no meio e algo já tinha sido gerado, pergunta se quer
+    manter ou apagar esses arquivos parciais.
+    """
+    sucesso = [r for r in resultados if r["status"] == "sucesso"]
+    falha = [r for r in resultados if r["status"] == "falha"]
+    cancelado = [r for r in resultados if r["status"] == "cancelado"]
+
+    if foi_cancelado and sucesso:
+        manter = messagebox.askyesno(
+            "Geração cancelada",
+            f"Cancelado — {len(sucesso)} já tinha(m) sido gerado(s) antes disso.\n\n"
+            "Quer MANTER esses arquivos, ou apagar tudo que já foi feito?\n\n"
+            "Sim = manter | Não = apagar"
+        )
+        if not manter:
+            for r in sucesso:
+                for caminho in r.get("arquivos", []):
+                    if caminho and os.path.exists(caminho):
+                        try:
+                            os.remove(caminho)
+                        except OSError:
+                            pass
+            sucesso = []
+
+    janela = tk.Toplevel(tela)
+    janela.title(titulo_janela)
+    janela.configure(bg="#7F14B7")
+    janela.geometry("500x420")
+
+    tk.Label(
+        janela,
+        text=f"✓ {len(sucesso)} pronto(s)    ✕ {len(falha)} falhou(aram)    ⊘ {len(cancelado)} cancelado(s)",
+        bg="#7F14B7", fg="#FEF500", font=("Industry-Black", 10, "bold")
+    ).pack(pady=10)
+
+    frame_lista_container = tk.Frame(janela, bg="#7F14B7")
+    frame_lista_container.pack(fill="both", expand=True, padx=10, pady=5)
+
+    canvas_lista = tk.Canvas(frame_lista_container, bg="#FFFFFF", highlightthickness=0)
+    scrollbar_lista = tk.Scrollbar(frame_lista_container, orient="vertical", command=canvas_lista.yview)
+    frame_lista = tk.Frame(canvas_lista, bg="#FFFFFF")
+
+    frame_lista.bind("<Configure>", lambda e: canvas_lista.configure(scrollregion=canvas_lista.bbox("all")))
+    canvas_lista.create_window((0, 0), window=frame_lista, anchor="nw")
+    canvas_lista.configure(yscrollcommand=scrollbar_lista.set)
+    canvas_lista.pack(side="left", fill="both", expand=True)
+    scrollbar_lista.pack(side="right", fill="y")
+
+    simbolos = {"sucesso": "✓", "falha": "✕", "cancelado": "⊘"}
+    for r in resultados:
+        tk.Label(
+            frame_lista, text=f"{simbolos[r['status']]} {r['title']}",
+            bg="#FFFFFF", anchor="w", font=("Industry-Black", 9)
+        ).pack(fill="x", padx=8, pady=1)
+
+    tk.Button(
+        janela, text="Fechar", command=janela.destroy,
+        bg="#FEF500", fg="#7F14B7", font=("Industry-Black", 9, "bold")
+    ).pack(pady=10)
 
 capitulos_vars = {}
 
@@ -818,15 +1010,17 @@ def generate_clips():
     if not _iniciar_operacao_longa():
         return
 
+    widgets_progresso = abrir_janela_progresso("Gerando cortes", len(segments))
+
     thread = threading.Thread(
         target=_gerar_cortes_worker,
-        args=(path, segments, enable_fade_in, enable_fade_out, enable_endslate, endslate_path, enable_logo, logo_path),
+        args=(path, segments, enable_fade_in, enable_fade_out, enable_endslate, endslate_path, enable_logo, logo_path, widgets_progresso),
         daemon=True,
     )
     thread.start()
 
 
-def _gerar_cortes_worker(path, segments, enable_fade_in, enable_fade_out, enable_endslate, endslate_path, enable_logo, logo_path):
+def _gerar_cortes_worker(path, segments, enable_fade_in, enable_fade_out, enable_endslate, endslate_path, enable_logo, logo_path, widgets_progresso):
     """
     Roda numa thread separada — todo o processamento ffmpeg acontece
     aqui, fora da thread principal, pra não travar a interface durante
@@ -851,15 +1045,21 @@ def _gerar_cortes_worker(path, segments, enable_fade_in, enable_fade_out, enable
     os.chdir(pasta_destino)
 
     ## Processamento dos segmentos ##
+    resultados = []
     total_segments = len(segments)
     for i, seg in enumerate(segments):
         start = seg["start"]
         end = seg["end"]
         title = seg["title"]
 
+        if _cancelar_geracao["solicitado"]:
+            resultados.append({"title": title, "status": "cancelado", "arquivos": []})
+            continue
+
         # Barra de progresso
         percent_progress = ((i + 1) / total_segments) * 100
         tela.after(0, lambda p=percent_progress: progress.config(value=p))
+        tela.after(0, lambda i=i: atualizar_janela_progresso(widgets_progresso, concluidos=i, em_andamento=1))
 
 
         ## Calculo de duração dos segmentos
@@ -1036,16 +1236,36 @@ def _gerar_cortes_worker(path, segments, enable_fade_in, enable_fade_out, enable
                         cmd_concat
                 )
 
-        tela.after(0, lambda i=i, total_segments=total_segments: txt_saida.insert(
-            tk.END, f"Clipe {i + 1}: Completo - {i + 1}/{total_segments}\n"
-        ))
+        caminho_saida_final = os.path.join(pasta_destino, f"{title}.mp4")
 
-        os.system(cmd)
+        codigo_saida = executar_comando_cancelavel(cmd)
         print(cmd)
 
+        if _cancelar_geracao["solicitado"]:
+            status = "cancelado"
+        elif codigo_saida == 0 and os.path.exists(caminho_saida_final):
+            status = "sucesso"
+        else:
+            status = "falha"
+
+        resultados.append({
+            "title": title,
+            "status": status,
+            "arquivos": [caminho_saida_final] if status == "sucesso" else [],
+        })
+
+        tela.after(0, lambda i=i, total_segments=total_segments, status=status: txt_saida.insert(
+            tk.END, f"Clipe {i + 1}/{total_segments}: {status.upper()}\n"
+        ))
+        tela.after(0, lambda i=i: atualizar_janela_progresso(widgets_progresso, concluidos=i + 1, em_andamento=0))
+
     os.chdir(pasta_original)
+    foi_cancelado = _cancelar_geracao["solicitado"]
     tela.after(0, lambda: txt_saida.see(tk.END))
     tela.after(0, _finalizar_operacao_longa)
+    tela.after(0, lambda: fechar_janela_progresso(widgets_progresso))
+    tela.after(0, tocar_som_conclusao)
+    tela.after(0, lambda: mostrar_resultado_geracao("Resultado — Cortes", resultados, foi_cancelado))
 
 
 def generate_clips_preview():
@@ -1067,11 +1287,13 @@ def generate_clips_preview():
     if not _iniciar_operacao_longa():
         return
 
-    thread = threading.Thread(target=_gerar_previews_worker, args=(path, segments), daemon=True)
+    widgets_progresso = abrir_janela_progresso("Gerando previews", len(segments))
+
+    thread = threading.Thread(target=_gerar_previews_worker, args=(path, segments, widgets_progresso), daemon=True)
     thread.start()
 
 
-def _gerar_previews_worker(path, segments):
+def _gerar_previews_worker(path, segments, widgets_progresso):
     """
     Roda numa thread separada, mesmo motivo do _gerar_cortes_worker —
     processamento ffmpeg fora da thread principal, atualizações de UI
@@ -1090,14 +1312,20 @@ def _gerar_previews_worker(path, segments):
     os.makedirs(pasta_preview_atual, exist_ok=True)
     os.chdir(pasta_preview_atual)
 
+    resultados = []
     total_segments = len(segments)
     for i, seg in enumerate(segments):
         start = seg["start"]
         end = seg["end"]
         title = seg["title"]
 
+        if _cancelar_geracao["solicitado"]:
+            resultados.append({"title": title, "status": "cancelado", "arquivos": []})
+            continue
+
         percent_progress = ((i + 1) / total_segments) * 100
         tela.after(0, lambda p=percent_progress: progress.config(value=p))
+        tela.after(0, lambda i=i: atualizar_janela_progresso(widgets_progresso, concluidos=i, em_andamento=1))
 
         # Time variables that I can work with
         start_dt = datetime.strptime(start, "%H:%M:%S")
@@ -1105,6 +1333,9 @@ def _gerar_previews_worker(path, segments):
 
         valid_start = (start_dt + preview_duration)
         #print(f"Start: {start} | Valid start: {valid_start}")
+
+        caminho_inicio = os.path.join(pasta_preview_atual, f"{title}_preview_start.mp4")
+        caminho_fim = None
 
         if end:
 
@@ -1133,6 +1364,7 @@ def _gerar_previews_worker(path, segments):
                 f'ffmpeg -ss {valid_end_str} -i "{path}" '
                 f'-t 5 -c copy "{title}_preview_end.mp4"'
             )
+            caminho_fim = os.path.join(pasta_preview_atual, f"{title}_preview_end.mp4")
 
         else:
             # Possible feature: add an end preview to the last clip with ffprobe (we need to find the duration of the
@@ -1141,22 +1373,36 @@ def _gerar_previews_worker(path, segments):
                                  f' -c copy "{title}_preview_start.mp4"')
             cmd_end_preview = None
 
-
-        tela.after(0, lambda i=i, total_segments=total_segments: txt_saida.insert(
-            tk.END, f"Clipe {i + 1}: Completo - {i + 1}/{total_segments}\n"
-        ))
-
         if cmd_end_preview:
             cmd = cmd_start_preview + " && " + cmd_end_preview
         else:
             cmd = cmd_start_preview
 
-        os.system(cmd)
+        codigo_saida = executar_comando_cancelavel(cmd)
+
+        if _cancelar_geracao["solicitado"]:
+            status = "cancelado"
+            arquivos_gerados = []
+        else:
+            arquivos_esperados = [caminho_inicio] + ([caminho_fim] if caminho_fim else [])
+            arquivos_gerados = [a for a in arquivos_esperados if os.path.exists(a)]
+            status = "sucesso" if codigo_saida == 0 and len(arquivos_gerados) == len(arquivos_esperados) else "falha"
+
+        resultados.append({"title": title, "status": status, "arquivos": arquivos_gerados})
+
+        tela.after(0, lambda i=i, total_segments=total_segments, status=status: txt_saida.insert(
+            tk.END, f"Clipe {i + 1}/{total_segments}: {status.upper()}\n"
+        ))
+        tela.after(0, lambda i=i: atualizar_janela_progresso(widgets_progresso, concluidos=i + 1, em_andamento=0))
 
     os.chdir(pasta_original)
+    foi_cancelado = _cancelar_geracao["solicitado"]
     tela.after(0, lambda: ultima_pasta_preview_var.set(pasta_preview_atual))
     tela.after(0, lambda: txt_saida.see(tk.END))
     tela.after(0, _finalizar_operacao_longa)
+    tela.after(0, lambda: fechar_janela_progresso(widgets_progresso))
+    tela.after(0, tocar_som_conclusao)
+    tela.after(0, lambda: mostrar_resultado_geracao("Resultado — Previews", resultados, foi_cancelado))
 
 
 
@@ -2135,6 +2381,7 @@ btn_criar_cortes.pack(side="left", padx=15)
 
 btn_criar_previews = tk.Button(frame_botoes, text="Criar preview de cortes", command=generate_clips_preview, bg="#FEF500", fg="#7F14B7", font=("Industry-Black", 10, "bold"))
 btn_criar_previews.pack(side="left", padx=15)
+
 
 
 lbl_saida = tk.Label(frame_conteudo, text="Progresso:", bg="#7F14B7", fg="#FEF500", font=("Industry-Black", 12, "bold"))

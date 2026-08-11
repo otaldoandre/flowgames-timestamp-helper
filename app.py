@@ -421,6 +421,110 @@ def atualizar_lista_projetos():
     return projetos_ordenados
 
 
+def excluir_projeto_selecionado():
+    """
+    Remove o projeto escolhido da LISTA — não apaga a pasta nem nenhum
+    arquivo dela do disco (cortes, thumbnails, etc. continuam intactos).
+    Pra apagar os arquivos de verdade, precisa ser feito manualmente,
+    fora do programa.
+    """
+    nome_selecionado = combo_projetos.get()
+    if not nome_selecionado:
+        messagebox.showinfo("Aviso", "Escolhe um projeto na lista primeiro.")
+        return
+
+    confirmar = messagebox.askyesno(
+        "Excluir projeto da lista",
+        f"Remover \"{nome_selecionado}\" da lista de projetos?\n\n"
+        "ISSO NÃO APAGA a pasta nem os arquivos do projeto (cortes, "
+        "thumbnails, tudo continua no disco normalmente) — só tira ele "
+        "dessa lista. Pra apagar os arquivos de verdade, isso precisa "
+        "ser feito manualmente, fora do programa."
+    )
+    if not confirmar:
+        return
+
+    projetos = carregar_registro_projetos()
+    projetos = [p for p in projetos if p["nome"] != nome_selecionado]
+    salvar_registro_projetos(projetos)
+
+    atualizar_lista_projetos()
+    combo_projetos.set("")
+
+    messagebox.showinfo(
+        "Projeto removido",
+        f"\"{nome_selecionado}\" foi removido da lista. Os arquivos continuam no disco, intactos."
+    )
+
+
+def abrir_janela_selecao_projeto(bloquear=True):
+    """
+    Janela dedicada de seleção de projeto — mostrada ANTES da janela
+    principal, na abertura do programa (bloquear=True: não deixa
+    fechar sem escolher/criar um projeto, a principal fica escondida
+    até isso acontecer). Também reaberta pelo botão "Trocar Projeto" da
+    janela principal (bloquear=False: pode fechar sem trocar nada,
+    cancela a operação).
+    """
+    global combo_projetos
+
+    pasta_antes = PASTA_PROJETO_ATUAL
+
+    janela_selecao = tk.Toplevel(tela)
+    janela_selecao.title("Selecionar Projeto")
+    janela_selecao.configure(bg="#7F14B7")
+    janela_selecao.geometry("520x230")
+
+    if bloquear:
+        janela_selecao.protocol("WM_DELETE_WINDOW", lambda: None)  # não deixa fechar sem escolher
+        janela_selecao.grab_set()
+
+    tk.Label(
+        janela_selecao, text="Projeto da live:", bg="#7F14B7", fg="#FEF500",
+        font=("Industry-Black", 12, "bold")
+    ).pack(pady=(20, 5))
+
+    combo_projetos = Combobox(janela_selecao, state="readonly", width=40)
+    combo_projetos.pack(pady=5)
+
+    projetos_existentes = atualizar_lista_projetos()
+    if projetos_existentes:
+        combo_projetos.set(projetos_existentes[0]["nome"])
+
+    def _projeto_mudou():
+        return PASTA_PROJETO_ATUAL and PASTA_PROJETO_ATUAL != pasta_antes
+
+    def _abrir_e_fechar():
+        abrir_projeto_selecionado()
+        if _projeto_mudou():
+            janela_selecao.destroy()
+            tela.deiconify()
+
+    def _criar_e_fechar():
+        criar_novo_projeto()
+        if _projeto_mudou():
+            janela_selecao.destroy()
+            tela.deiconify()
+
+    frame_botoes_selecao = tk.Frame(janela_selecao, bg="#7F14B7")
+    frame_botoes_selecao.pack(pady=15)
+
+    tk.Button(
+        frame_botoes_selecao, text="Abrir Projeto", command=_abrir_e_fechar,
+        bg="#FEF500", fg="#7F14B7", font=("Industry-Black", 10, "bold")
+    ).pack(side="left", padx=5)
+
+    tk.Button(
+        frame_botoes_selecao, text="Criar Novo Projeto", command=_criar_e_fechar,
+        bg="#FEF500", fg="#7F14B7", font=("Industry-Black", 10, "bold")
+    ).pack(side="left", padx=5)
+
+    tk.Button(
+        frame_botoes_selecao, text="Excluir da Lista", command=excluir_projeto_selecionado,
+        bg="#FEF500", fg="#7F14B7", font=("Industry-Black", 9, "bold")
+    ).pack(side="left", padx=5)
+
+
 def resolver_video():
     """
     Botão único: baixa o vídeo do YouTube (se houver link) ou abre o diálogo
@@ -1714,6 +1818,7 @@ print(font.families())
 tela.title("Crie cortes com base nas timestamps!")
 tela.geometry("900x800")
 tela.configure(bg="#7F14B7")
+tela.withdraw()  # só aparece depois de escolher/criar um projeto
 
 # Container rolável pra toda a interface — sem isso, qualquer seção nova
 # empurra a de baixo pra fora da janela e ela some sem aviso nenhum.
@@ -1744,56 +1849,28 @@ canvas_principal.bind_all("<MouseWheel>", _rolar_com_mouse)
 
 pasta_projeto_var = tk.StringVar(value="Nenhum projeto aberto")
 
-frame_projeto = tk.Frame(frame_conteudo, bg="#7F14B7")
-frame_projeto.pack(pady=8)
-
-lbl_lista_projetos = tk.Label(
-    frame_projeto, text="Projeto:", bg="#7F14B7", fg="#FEF500", font=("Industry-Black", 10, "bold")
-)
-lbl_lista_projetos.pack(side="left", padx=(0, 5))
-
-combo_projetos = Combobox(frame_projeto, state="readonly", width=35)
-combo_projetos.pack(side="left", padx=5)
-
-btn_abrir_projeto = tk.Button(
-    frame_projeto,
-    text="Abrir Projeto Selecionado",
-    command=abrir_projeto_selecionado,
-    bg="#FEF500",
-    fg="#7F14B7",
-    font=("Industry-Black", 9, "bold")
-)
-btn_abrir_projeto.pack(side="left", padx=5)
-
-btn_novo_projeto = tk.Button(
-    frame_projeto,
-    text="Criar Novo Projeto",
-    command=criar_novo_projeto,
-    bg="#FEF500",
-    fg="#7F14B7",
-    font=("Industry-Black", 9, "bold")
-)
-btn_novo_projeto.pack(side="left", padx=5)
-
 frame_projeto_ativo = tk.Frame(frame_conteudo, bg="#7F14B7")
-frame_projeto_ativo.pack(pady=(0, 8))
+frame_projeto_ativo.pack(pady=8)
 
 lbl_projeto = tk.Label(
     frame_projeto_ativo,
     textvariable=pasta_projeto_var,
     bg="#7F14B7",
     fg="#FFFFFF",
-    wraplength=600,
+    wraplength=500,
     justify="left"
 )
-lbl_projeto.pack()
+lbl_projeto.pack(side="left", padx=5)
 
-# Preenche a lista com os projetos já criados — a abertura automática
-# do mais recente acontece só no final do arquivo, depois que todos os
-# outros widgets (capítulos, saída, etc) já existirem
-_projetos_existentes = atualizar_lista_projetos()
-if _projetos_existentes:
-    combo_projetos.set(_projetos_existentes[0]["nome"])
+btn_trocar_projeto = tk.Button(
+    frame_projeto_ativo,
+    text="Trocar Projeto",
+    command=lambda: abrir_janela_selecao_projeto(bloquear=False),
+    bg="#FEF500",
+    fg="#7F14B7",
+    font=("Industry-Black", 9, "bold")
+)
+btn_trocar_projeto.pack(side="left", padx=5)
 
 lbl_instrucao = tk.Label(frame_conteudo, text="Cole as timestamps aqui:", bg="#7F14B7", fg="#FEF500", font=("Industry-Black", 12, "bold"))
 lbl_instrucao.pack(pady=10)
@@ -2206,12 +2283,10 @@ btn_posicionar_logo = tk.Button(
 )
 btn_posicionar_logo.pack(side="left", padx=10)
 
-# Abre automaticamente o projeto mais recente (se algum já existir),
-# pra retomar de onde parou sem precisar clicar em nada — feito aqui no
-# final porque depende de widgets (frame_capitulos, txt_saida, etc.)
-# que só existem depois de toda a interface montada
-if _projetos_existentes:
-    abrir_projeto_selecionado()
+# Mostra a janela de seleção de projeto ANTES da principal — feito aqui
+# no final porque depende de widgets (frame_capitulos, txt_saida, etc.)
+# que só existem depois de toda a interface principal já montada
+abrir_janela_selecao_projeto(bloquear=True)
 
 # Inicia a interface
 tela.mainloop()

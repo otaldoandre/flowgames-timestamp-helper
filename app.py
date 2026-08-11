@@ -11,6 +11,7 @@ import subprocess
 import shutil
 import sys
 import threading
+import time
 
 
 def obter_pasta_base():
@@ -1988,6 +1989,11 @@ def gerar_thumbnail_para_capitulo(title, seg):
     sugerida (isso continua escolha manual sua — não dá pra confiar
     busca automática de imagem).
 
+    A parte interativa (escolher imagem, gerar/buscar metadata da IA,
+    escolher frame) roda aqui, na thread principal, porque envolve
+    diálogo/janela — só a parte pesada (remoção de fundo + Photoshop)
+    vai pra thread separada, em _gerar_thumbnail_worker().
+
     Se esse capítulo tiver metadata gerado pela IA (veio de "Gerar
     capítulos automaticamente"), usa o texto de thumbnail que ela já
     sugeriu; senão, usa o próprio título como texto.
@@ -2021,9 +2027,36 @@ def gerar_thumbnail_para_capitulo(title, seg):
     if not caminho_frame_bruto:
         return
 
+    if not _iniciar_operacao_longa():
+        return
+
     txt_saida.insert(tk.END, f"Gerando thumbnail pra \"{title}\" (pode demorar, o Photoshop vai abrir)...\n")
     txt_saida.see(tk.END)
-    tela.update_idletasks()
+
+    thread = threading.Thread(
+        target=_gerar_thumbnail_worker,
+        args=(title, caminho_frame_bruto, caminho_imagem_sugerida, linha1, linha2),
+        daemon=True,
+    )
+    thread.start()
+
+
+def _gerar_thumbnail_worker(title, caminho_frame_bruto, caminho_imagem_sugerida, linha1, linha2):
+    """
+    Roda numa thread separada — remoção de fundo + automação do
+    Photoshop, fora da thread principal, pra não travar a interface.
+
+    IMPORTANTE, diferente de corte/preview: o Photoshop via COM é uma
+    instância ÚNICA compartilhada (não como o ffmpeg, onde vários
+    processos rodam em paralelo sem problema) — duas automações
+    tentando mexer nele ao mesmo tempo se atropelam e corrompem uma à
+    outra. Por isso usa a MESMA trava de operação única de
+    corte/preview (_iniciar_operacao_longa/_finalizar_operacao_longa),
+    mesmo sendo uma operação diferente — nunca pode ter duas rodando
+    junto, seja thumbnail+thumbnail ou thumbnail+corte.
+    """
+    MAX_TENTATIVAS = 3
+    PAUSA_ENTRE_TENTATIVAS = 3  # segundos
 
     pasta_thumbnail_raiz = None
     if PASTA_PROJETO_ATUAL:
@@ -2035,29 +2068,49 @@ def gerar_thumbnail_para_capitulo(title, seg):
     else:
         pasta_saida_geracao = PASTA_SAIDA_THUMBNAILS
 
-    try:
-        resultado_thumb = montar_thumbnail_completa(
-            CAMINHO_TEMPLATE_THUMBNAIL,
-            caminho_frame_bruto,
-            caminho_imagem_sugerida,
-            linha1,
-            linha2,
-            pasta_saida_geracao,
-            title,
-            lado_forcado=LADO_THUMBNAIL_PADRAO,
-        )
-    except Exception as e:
-        # Qualquer erro inesperado (Photoshop travado, arquivo em uso,
-        # etc.) cai aqui em vez de um traceback cru — o programa
-        # continua rodando normalmente, só essa thumbnail específica
-        # falhou.
-        txt_saida.insert(tk.END, f"[ERRO INESPERADO] Falha ao gerar thumbnail de \"{title}\": {e}\n")
-        txt_saida.see(tk.END)
-        messagebox.showerror(
+    resultado_thumb = None
+    erro_capturado = None
+
+    for tentativa in range(1, MAX_TENTATIVAS + 1):
+        try:
+            resultado_thumb = montar_thumbnail_completa(
+                CAMINHO_TEMPLATE_THUMBNAIL,
+                caminho_frame_bruto,
+                caminho_imagem_sugerida,
+                linha1,
+                linha2,
+                pasta_saida_geracao,
+                title,
+                lado_forcado=LADO_THUMBNAIL_PADRAO,
+            )
+            erro_capturado = None
+        except Exception as e:
+            resultado_thumb = None
+            erro_capturado = str(e)
+
+        if resultado_thumb:
+            break  # deu certo, não precisa tentar de novo
+
+        # Falha (seja exceção Python, seja o Photoshop devolvendo "ERRO:
+        # ...") — muitas dessas são instabilidade transitória do COM
+        # (ex: "comando não disponível no momento"), então vale tentar
+        # de novo antes de desistir de vez
+        if tentativa < MAX_TENTATIVAS:
+            tela.after(0, lambda t=tentativa: txt_saida.insert(
+                tk.END, f"Tentativa {t} falhou, tentando de novo em {PAUSA_ENTRE_TENTATIVAS}s...\n"
+            ))
+            time.sleep(PAUSA_ENTRE_TENTATIVAS)
+
+    if erro_capturado and not resultado_thumb:
+        tela.after(0, lambda: txt_saida.insert(
+            tk.END, f"[ERRO INESPERADO] Falha ao gerar thumbnail de \"{title}\" após {MAX_TENTATIVAS} tentativas: {erro_capturado}\n"
+        ))
+        tela.after(0, lambda: messagebox.showerror(
             "Erro ao gerar thumbnail",
-            f"Algo deu errado gerando a thumbnail de \"{title}\":\n\n{e}\n\n"
+            f"Algo deu errado gerando a thumbnail de \"{title}\" (tentei {MAX_TENTATIVAS} vezes):\n\n{erro_capturado}\n\n"
             "O programa continua funcionando normalmente — só essa thumbnail não foi gerada."
-        )
+        ))
+        tela.after(0, _finalizar_operacao_longa)
         return
 
     if resultado_thumb and pasta_thumbnail_raiz:
@@ -2077,14 +2130,21 @@ def gerar_thumbnail_para_capitulo(title, seg):
             if os.path.exists(caminho_psd_gerado):
                 shutil.move(caminho_psd_gerado, destino_psd)
         except OSError as e:
-            txt_saida.insert(tk.END, f"[AVISO] Thumbnail gerada, mas não consegui reorganizar os arquivos: {e}\n")
+            tela.after(0, lambda e=e: txt_saida.insert(
+                tk.END, f"[AVISO] Thumbnail gerada, mas não consegui reorganizar os arquivos: {e}\n"
+            ))
 
     if resultado_thumb:
-        txt_saida.insert(tk.END, f"Thumbnail pronta: {resultado_thumb}\n")
-        messagebox.showinfo("Thumbnail", f"Pronta! Revisa o .psd antes de publicar (posição/tamanho do host, sombra).")
+        tela.after(0, lambda: txt_saida.insert(tk.END, f"Thumbnail pronta: {resultado_thumb}\n"))
+        tela.after(0, lambda: messagebox.showinfo(
+            "Thumbnail", "Pronta! Revisa o .psd antes de publicar (posição/tamanho do host, sombra)."
+        ))
     else:
-        txt_saida.insert(tk.END, f"Falha ao gerar thumbnail de \"{title}\" — confere o log do Photoshop.\n")
-    txt_saida.see(tk.END)
+        tela.after(0, lambda: txt_saida.insert(
+            tk.END, f"Falha ao gerar thumbnail de \"{title}\" — confere o log do Photoshop.\n"
+        ))
+    tela.after(0, lambda: txt_saida.see(tk.END))
+    tela.after(0, _finalizar_operacao_longa)
 
 
 def carregar_capitulos(estado_inicial=None):

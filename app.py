@@ -10,6 +10,7 @@ import json
 import subprocess
 import shutil
 import sys
+import threading
 
 
 def obter_pasta_base():
@@ -90,6 +91,30 @@ if _caminhos_faltando:
 # confiável nos frames reais — força um lado fixo aqui até isso
 # melhorar. Ajusta manualmente se um corte específico precisar do outro.
 LADO_THUMBNAIL_PADRAO = "direita"
+
+# Evita duas operações longas rodando ao mesmo tempo (ex: clicar "Criar
+# cortes" duas vezes, ou cortes + preview juntos) — os.chdir() é
+# compartilhado pelo processo inteiro, então rodar duas dessas em
+# paralelo bagunçaria qual pasta cada uma tá escrevendo.
+_operacao_longa_ativa = {"valor": False}
+
+
+def _iniciar_operacao_longa():
+    """Marca uma operação longa como em andamento e desabilita os botões que disparam outra. Retorna False se já tiver uma rodando."""
+    if _operacao_longa_ativa["valor"]:
+        messagebox.showinfo("Aguarde", "Já tem uma operação rodando — espera terminar antes de iniciar outra.")
+        return False
+    _operacao_longa_ativa["valor"] = True
+    btn_criar_cortes.config(state="disabled")
+    btn_criar_previews.config(state="disabled")
+    return True
+
+
+def _finalizar_operacao_longa():
+    """Chamado de volta na thread principal (via tela.after) quando a operação termina."""
+    _operacao_longa_ativa["valor"] = False
+    btn_criar_cortes.config(state="normal")
+    btn_criar_previews.config(state="normal")
 
 capitulos_vars = {}
 
@@ -789,6 +814,27 @@ def generate_clips():
         )
 
         return
+
+    if not _iniciar_operacao_longa():
+        return
+
+    thread = threading.Thread(
+        target=_gerar_cortes_worker,
+        args=(path, segments, enable_fade_in, enable_fade_out, enable_endslate, endslate_path, enable_logo, logo_path),
+        daemon=True,
+    )
+    thread.start()
+
+
+def _gerar_cortes_worker(path, segments, enable_fade_in, enable_fade_out, enable_endslate, endslate_path, enable_logo, logo_path):
+    """
+    Roda numa thread separada — todo o processamento ffmpeg acontece
+    aqui, fora da thread principal, pra não travar a interface durante
+    cortes longos. NENHUM widget do Tkinter pode ser tocado direto
+    aqui dentro (não é thread-safe) — atualizações de tela são
+    agendadas via tela.after(0, ...) pra rodar de volta na thread
+    principal.
+    """
     fade_duration = 1.4
 
     ## Pasta de Output ##
@@ -813,8 +859,7 @@ def generate_clips():
 
         # Barra de progresso
         percent_progress = ((i + 1) / total_segments) * 100
-        progress.config(value=percent_progress)
-        tela.update_idletasks()
+        tela.after(0, lambda p=percent_progress: progress.config(value=p))
 
 
         ## Calculo de duração dos segmentos
@@ -991,12 +1036,16 @@ def generate_clips():
                         cmd_concat
                 )
 
-        txt_saida.insert(tk.END, f"Clipe {i + 1}: Completo - {i + 1}/{total_segments}\n")
+        tela.after(0, lambda i=i, total_segments=total_segments: txt_saida.insert(
+            tk.END, f"Clipe {i + 1}: Completo - {i + 1}/{total_segments}\n"
+        ))
 
         os.system(cmd)
         print(cmd)
 
     os.chdir(pasta_original)
+    tela.after(0, lambda: txt_saida.see(tk.END))
+    tela.after(0, _finalizar_operacao_longa)
 
 
 def generate_clips_preview():
@@ -1015,6 +1064,19 @@ def generate_clips_preview():
         messagebox.showinfo("Aviso", "Nenhum capítulo marcado para gerar preview.")
         return
 
+    if not _iniciar_operacao_longa():
+        return
+
+    thread = threading.Thread(target=_gerar_previews_worker, args=(path, segments), daemon=True)
+    thread.start()
+
+
+def _gerar_previews_worker(path, segments):
+    """
+    Roda numa thread separada, mesmo motivo do _gerar_cortes_worker —
+    processamento ffmpeg fora da thread principal, atualizações de UI
+    agendadas via tela.after(0, ...).
+    """
     pasta_original = os.getcwd()
 
     if PASTA_PROJETO_ATUAL:
@@ -1035,8 +1097,7 @@ def generate_clips_preview():
         title = seg["title"]
 
         percent_progress = ((i + 1) / total_segments) * 100
-        progress.config(value=percent_progress)
-        tela.update_idletasks()
+        tela.after(0, lambda p=percent_progress: progress.config(value=p))
 
         # Time variables that I can work with
         start_dt = datetime.strptime(start, "%H:%M:%S")
@@ -1081,7 +1142,9 @@ def generate_clips_preview():
             cmd_end_preview = None
 
 
-        txt_saida.insert(tk.END, f"Clipe {i + 1}: Completo - {i + 1}/{total_segments}\n")
+        tela.after(0, lambda i=i, total_segments=total_segments: txt_saida.insert(
+            tk.END, f"Clipe {i + 1}: Completo - {i + 1}/{total_segments}\n"
+        ))
 
         if cmd_end_preview:
             cmd = cmd_start_preview + " && " + cmd_end_preview
@@ -1091,7 +1154,11 @@ def generate_clips_preview():
         os.system(cmd)
 
     os.chdir(pasta_original)
-    ultima_pasta_preview_var.set(pasta_preview_atual)
+    tela.after(0, lambda: ultima_pasta_preview_var.set(pasta_preview_atual))
+    tela.after(0, lambda: txt_saida.see(tk.END))
+    tela.after(0, _finalizar_operacao_longa)
+
+
 
 def select_endslate():
 

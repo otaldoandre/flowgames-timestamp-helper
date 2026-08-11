@@ -1012,6 +1012,38 @@ def encontrar_janela_explorer_aberta(caminho_pasta):
     return None
 
 
+def forcar_janela_para_frente(hwnd):
+    """
+    SetForegroundWindow sozinho costuma FALHAR silenciosamente (só
+    pisca o ícone na barra de tarefas, sem trazer a janela de verdade)
+    quando quem chama não é o processo já em primeiro plano — é
+    restrição de segurança do próprio Windows, não bug nosso.
+
+    O contorno documentado: "anexa" temporariamente a entrada do nosso
+    processo à thread da janela alvo antes de pedir o foco, e desanexa
+    logo depois — com isso o Windows permite de verdade.
+    """
+    import win32gui
+    import win32process
+    import win32con
+    import win32api
+
+    if win32gui.IsIconic(hwnd):
+        win32gui.ShowWindow(hwnd, win32con.SW_RESTORE)
+
+    thread_atual = win32api.GetCurrentThreadId()
+    thread_alvo, _ = win32process.GetWindowThreadProcessId(hwnd)
+
+    if thread_atual != thread_alvo:
+        win32process.AttachThreadInput(thread_atual, thread_alvo, True)
+        try:
+            win32gui.SetForegroundWindow(hwnd)
+        finally:
+            win32process.AttachThreadInput(thread_atual, thread_alvo, False)
+    else:
+        win32gui.SetForegroundWindow(hwnd)
+
+
 def abrir_pasta_projeto():
     """
     Abre a pasta do projeto atual no Explorer — se já tiver uma janela
@@ -1028,8 +1060,7 @@ def abrir_pasta_projeto():
     janela_existente = encontrar_janela_explorer_aberta(PASTA_PROJETO_ATUAL)
     if janela_existente:
         try:
-            import win32gui
-            win32gui.SetForegroundWindow(janela_existente.HWND)
+            forcar_janela_para_frente(janela_existente.HWND)
             return
         except Exception:
             pass  # não conseguiu focar — cai no comportamento padrão abaixo

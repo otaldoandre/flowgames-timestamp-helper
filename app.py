@@ -244,6 +244,54 @@ def fechar_janela_progresso(widgets):
         widgets["janela"].destroy()
 
 
+def perguntar_o_que_fazer_com_existentes(quantidade_existente, quantidade_total):
+    """
+    Pergunta UMA VEZ (não corte por corte) o que fazer quando parte dos
+    arquivos já existe na pasta de destino — evita tanto sobrescrever
+    sem avisar quanto encher a tela de caixinha repetida.
+    Retorna "pular", "sobrescrever", ou None (cancelou).
+    """
+    resultado = {"escolha": None}
+
+    janela = tk.Toplevel(tela)
+    janela.title("Arquivos já existem")
+    janela.configure(bg="#7F14B7")
+    janela.geometry("440x200")
+    janela.grab_set()
+
+    tk.Label(
+        janela,
+        text=f"{quantidade_existente} de {quantidade_total} já foram gerados antes.\n\nO que fazer com eles?",
+        bg="#7F14B7", fg="#FFFFFF", font=("Industry-Black", 10, "bold"),
+        justify="center", wraplength=400
+    ).pack(pady=20)
+
+    def escolher(opcao):
+        resultado["escolha"] = opcao
+        janela.destroy()
+
+    frame_botoes_existentes = tk.Frame(janela, bg="#7F14B7")
+    frame_botoes_existentes.pack(pady=10)
+
+    tk.Button(
+        frame_botoes_existentes, text="Pular os prontos", command=lambda: escolher("pular"),
+        bg="#FEF500", fg="#7F14B7", font=("Industry-Black", 9, "bold")
+    ).pack(side="left", padx=5)
+
+    tk.Button(
+        frame_botoes_existentes, text="Regenerar todos", command=lambda: escolher("sobrescrever"),
+        bg="#FEF500", fg="#7F14B7", font=("Industry-Black", 9, "bold")
+    ).pack(side="left", padx=5)
+
+    tk.Button(
+        frame_botoes_existentes, text="Cancelar", command=lambda: escolher(None),
+        bg="#FFFFFF", fg="#7F14B7", font=("Industry-Black", 9, "bold")
+    ).pack(side="left", padx=5)
+
+    janela.wait_window()
+    return resultado["escolha"]
+
+
 def mostrar_resultado_geracao(titulo_janela, resultados, foi_cancelado):
     """
     Mostra o resultado final de uma geração (cortes ou previews) — o
@@ -254,6 +302,7 @@ def mostrar_resultado_geracao(titulo_janela, resultados, foi_cancelado):
     sucesso = [r for r in resultados if r["status"] == "sucesso"]
     falha = [r for r in resultados if r["status"] == "falha"]
     cancelado = [r for r in resultados if r["status"] == "cancelado"]
+    pulado = [r for r in resultados if r["status"] == "pulado"]
 
     if foi_cancelado and sucesso:
         manter = messagebox.askyesno(
@@ -279,7 +328,10 @@ def mostrar_resultado_geracao(titulo_janela, resultados, foi_cancelado):
 
     tk.Label(
         janela,
-        text=f"✓ {len(sucesso)} pronto(s)    ✕ {len(falha)} falhou(aram)    ⊘ {len(cancelado)} cancelado(s)",
+        text=(
+            f"✓ {len(sucesso)} pronto(s)    ✕ {len(falha)} falhou(aram)    "
+            f"⊘ {len(cancelado)} cancelado(s)    ➖ {len(pulado)} pulado(s)"
+        ),
         bg="#7F14B7", fg="#FEF500", font=("Industry-Black", 10, "bold")
     ).pack(pady=10)
 
@@ -296,7 +348,7 @@ def mostrar_resultado_geracao(titulo_janela, resultados, foi_cancelado):
     canvas_lista.pack(side="left", fill="both", expand=True)
     scrollbar_lista.pack(side="right", fill="y")
 
-    simbolos = {"sucesso": "✓", "falha": "✕", "cancelado": "⊘"}
+    simbolos = {"sucesso": "✓", "falha": "✕", "cancelado": "⊘", "pulado": "➖"}
     for r in resultados:
         tk.Label(
             frame_lista, text=f"{simbolos[r['status']]} {r['title']}",
@@ -1010,17 +1062,37 @@ def generate_clips():
     if not _iniciar_operacao_longa():
         return
 
+    ## Pasta de Output — calculada aqui (não no worker) pra poder checar
+    ## quais arquivos já existem ANTES de decidir se inicia a operação
+    if PASTA_PROJETO_ATUAL:
+        pasta_destino = os.path.join(PASTA_PROJETO_ATUAL, "cortes")
+    else:
+        date = datetime.now().strftime("%d/%m/%Y %H:%M")
+        date = get_clean_title(date)
+        pasta_destino = f"cortes - {date}"
+    os.makedirs(pasta_destino, exist_ok=True)
+
+    ja_existentes = [seg for seg in segments if os.path.exists(os.path.join(pasta_destino, f"{seg['title']}.mp4"))]
+
+    pular_existentes = False
+    if ja_existentes:
+        escolha = perguntar_o_que_fazer_com_existentes(len(ja_existentes), len(segments))
+        if escolha is None:
+            _finalizar_operacao_longa()
+            return
+        pular_existentes = (escolha == "pular")
+
     widgets_progresso = abrir_janela_progresso("Gerando cortes", len(segments))
 
     thread = threading.Thread(
         target=_gerar_cortes_worker,
-        args=(path, segments, enable_fade_in, enable_fade_out, enable_endslate, endslate_path, enable_logo, logo_path, widgets_progresso),
+        args=(path, segments, enable_fade_in, enable_fade_out, enable_endslate, endslate_path, enable_logo, logo_path, widgets_progresso, pasta_destino, pular_existentes),
         daemon=True,
     )
     thread.start()
 
 
-def _gerar_cortes_worker(path, segments, enable_fade_in, enable_fade_out, enable_endslate, endslate_path, enable_logo, logo_path, widgets_progresso):
+def _gerar_cortes_worker(path, segments, enable_fade_in, enable_fade_out, enable_endslate, endslate_path, enable_logo, logo_path, widgets_progresso, pasta_destino, pular_existentes):
     """
     Roda numa thread separada — todo o processamento ffmpeg acontece
     aqui, fora da thread principal, pra não travar a interface durante
@@ -1033,15 +1105,6 @@ def _gerar_cortes_worker(path, segments, enable_fade_in, enable_fade_out, enable
 
     ## Pasta de Output ##
     pasta_original = os.getcwd()
-
-    if PASTA_PROJETO_ATUAL:
-        pasta_destino = os.path.join(PASTA_PROJETO_ATUAL, "cortes")
-    else:
-        date = datetime.now().strftime("%d/%m/%Y %H:%M")
-        date = get_clean_title(date)
-        pasta_destino = f"cortes - {date}"
-
-    os.makedirs(pasta_destino, exist_ok=True)
     os.chdir(pasta_destino)
 
     ## Processamento dos segmentos ##
@@ -1054,6 +1117,12 @@ def _gerar_cortes_worker(path, segments, enable_fade_in, enable_fade_out, enable
 
         if _cancelar_geracao["solicitado"]:
             resultados.append({"title": title, "status": "cancelado", "arquivos": []})
+            continue
+
+        caminho_saida_esperado = os.path.join(pasta_destino, f"{title}.mp4")
+        if pular_existentes and os.path.exists(caminho_saida_esperado):
+            resultados.append({"title": title, "status": "pulado", "arquivos": [caminho_saida_esperado]})
+            tela.after(0, lambda i=i: atualizar_janela_progresso(widgets_progresso, concluidos=i + 1, em_andamento=0))
             continue
 
         # Barra de progresso
@@ -1287,20 +1356,7 @@ def generate_clips_preview():
     if not _iniciar_operacao_longa():
         return
 
-    widgets_progresso = abrir_janela_progresso("Gerando previews", len(segments))
-
-    thread = threading.Thread(target=_gerar_previews_worker, args=(path, segments, widgets_progresso), daemon=True)
-    thread.start()
-
-
-def _gerar_previews_worker(path, segments, widgets_progresso):
-    """
-    Roda numa thread separada, mesmo motivo do _gerar_cortes_worker —
-    processamento ffmpeg fora da thread principal, atualizações de UI
-    agendadas via tela.after(0, ...).
-    """
     pasta_original = os.getcwd()
-
     if PASTA_PROJETO_ATUAL:
         pasta_preview_atual = os.path.join(PASTA_PROJETO_ATUAL, "preview")
     else:
@@ -1308,8 +1364,41 @@ def _gerar_previews_worker(path, segments, widgets_progresso):
         date = datetime.now().strftime("%d/%m/%Y %H:%M")
         date = get_clean_title(date)
         pasta_preview_atual = os.path.join(pasta_original, f"preview - {date}")
-
     os.makedirs(pasta_preview_atual, exist_ok=True)
+
+    def _preview_ja_completo(seg):
+        caminhos = [os.path.join(pasta_preview_atual, f"{seg['title']}_preview_start.mp4")]
+        if seg["end"]:
+            caminhos.append(os.path.join(pasta_preview_atual, f"{seg['title']}_preview_end.mp4"))
+        return all(os.path.exists(c) for c in caminhos)
+
+    ja_existentes = [seg for seg in segments if _preview_ja_completo(seg)]
+
+    pular_existentes = False
+    if ja_existentes:
+        escolha = perguntar_o_que_fazer_com_existentes(len(ja_existentes), len(segments))
+        if escolha is None:
+            _finalizar_operacao_longa()
+            return
+        pular_existentes = (escolha == "pular")
+
+    widgets_progresso = abrir_janela_progresso("Gerando previews", len(segments))
+
+    thread = threading.Thread(
+        target=_gerar_previews_worker,
+        args=(path, segments, widgets_progresso, pasta_preview_atual, pular_existentes),
+        daemon=True,
+    )
+    thread.start()
+
+
+def _gerar_previews_worker(path, segments, widgets_progresso, pasta_preview_atual, pular_existentes):
+    """
+    Roda numa thread separada, mesmo motivo do _gerar_cortes_worker —
+    processamento ffmpeg fora da thread principal, atualizações de UI
+    agendadas via tela.after(0, ...).
+    """
+    pasta_original = os.getcwd()
     os.chdir(pasta_preview_atual)
 
     resultados = []
@@ -1321,6 +1410,15 @@ def _gerar_previews_worker(path, segments, widgets_progresso):
 
         if _cancelar_geracao["solicitado"]:
             resultados.append({"title": title, "status": "cancelado", "arquivos": []})
+            continue
+
+        caminhos_esperados_preview = [os.path.join(pasta_preview_atual, f"{title}_preview_start.mp4")]
+        if end:
+            caminhos_esperados_preview.append(os.path.join(pasta_preview_atual, f"{title}_preview_end.mp4"))
+
+        if pular_existentes and all(os.path.exists(c) for c in caminhos_esperados_preview):
+            resultados.append({"title": title, "status": "pulado", "arquivos": caminhos_esperados_preview})
+            tela.after(0, lambda i=i: atualizar_janela_progresso(widgets_progresso, concluidos=i + 1, em_andamento=0))
             continue
 
         percent_progress = ((i + 1) / total_segments) * 100

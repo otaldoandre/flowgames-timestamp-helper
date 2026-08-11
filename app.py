@@ -42,7 +42,19 @@ load_dotenv(caminho_env)
 # cancelado), fecha o programa aqui mesmo.
 from auth_google import autenticar_usuario
 
-_email_autenticado = autenticar_usuario()
+try:
+    _email_autenticado = autenticar_usuario()
+except Exception as _erro_login:
+    _tela_erro_login = tk.Tk()
+    _tela_erro_login.withdraw()
+    messagebox.showerror(
+        "Erro no login",
+        f"Não consegui fazer o login com o Google:\n\n{_erro_login}\n\n"
+        "Confere se o arquivo client_secret.json está na mesma pasta do programa."
+    )
+    _tela_erro_login.destroy()
+    sys.exit(1)
+
 if not _email_autenticado:
     _tela_login = tk.Tk()
     _tela_login.withdraw()
@@ -86,6 +98,22 @@ if _caminhos_faltando:
         + "\n\nAdiciona elas no .env antes de rodar o programa."
     )
     _tela_erro_config.destroy()
+    sys.exit(1)
+
+# ffmpeg/ffprobe são pré-requisito de quase tudo no programa (cortes,
+# previews, extração de frame) — checa aqui, uma vez, em vez de deixar
+# a primeira tentativa de corte falhar silenciosamente sem dizer o motivo
+if not shutil.which("ffmpeg") or not shutil.which("ffprobe"):
+    _tela_erro_ffmpeg = tk.Tk()
+    _tela_erro_ffmpeg.withdraw()
+    messagebox.showerror(
+        "ffmpeg não encontrado",
+        "O programa precisa do ffmpeg (e ffprobe) instalado e disponível no "
+        "PATH do sistema, e não consegui encontrar.\n\n"
+        "Instala o ffmpeg e garante que ele apareça no terminal (digitando "
+        "\"ffmpeg -version\") antes de continuar."
+    )
+    _tela_erro_ffmpeg.destroy()
     sys.exit(1)
 
 # Detecção automática de lado (esquerda/direita do host) ainda não é
@@ -1698,7 +1726,16 @@ def obter_metadata_ia_do_capitulo(title, seg):
 
     treino = carregar_json(CAMINHO_TREINO_IA)
     exemplos = selecionar_exemplos_few_shot(treino)
-    dados_ia = avaliar_capitulo({"texto": texto}, exemplos)
+
+    try:
+        dados_ia = avaliar_capitulo({"texto": texto}, exemplos)
+    except Exception as e:
+        messagebox.showerror(
+            "Erro na IA",
+            f"Não consegui gerar a sugestão de texto:\n\n{e}\n\n"
+            "Confere se a GEMINI_API_KEY no .env está certa."
+        )
+        return {}
 
     if dados_ia:
         metadata_ia[title] = dados_ia
@@ -2413,7 +2450,16 @@ def gerar_capitulos_automaticamente():
 
         titulo = "Sem titulo"
         if texto.strip():
-            avaliacao = avaliar_capitulo({"texto": texto}, exemplos)
+            try:
+                avaliacao = avaliar_capitulo({"texto": texto}, exemplos)
+            except Exception as e:
+                messagebox.showerror(
+                    "Erro na IA",
+                    f"Não consegui gerar os títulos:\n\n{e}\n\n"
+                    "Confere se a GEMINI_API_KEY no .env está certa.\n\n"
+                    f"Parando aqui — {i} de {len(fronteiras)} capítulos já foram processados."
+                )
+                break
             if avaliacao and avaliacao.get("titulo"):
                 titulo = avaliacao["titulo"]
                 chave_metadata = f"{i + 1}-" + get_clean_title(titulo)
@@ -2919,6 +2965,28 @@ btn_posicionar_logo = tk.Button(
     font=("Industry-Black", 10, "bold")
 )
 btn_posicionar_logo.pack(side="left", padx=10)
+
+
+def confirmar_fechar_programa():
+    """
+    Chamado ao tentar fechar a janela principal (X ou Alt+F4) — se
+    tiver uma operação longa rodando (corte, preview ou thumbnail),
+    avisa antes: fechar no meio pode deixar arquivo pela metade ou
+    travar o Photoshop com o documento ainda aberto.
+    """
+    if _operacao_longa_ativa["valor"]:
+        if not messagebox.askyesno(
+            "Operação em andamento",
+            "Tem uma operação rodando agora (corte, preview ou thumbnail).\n\n"
+            "Fechar o programa nesse momento pode deixar um arquivo pela "
+            "metade, ou travar o Photoshop com o documento ainda aberto.\n\n"
+            "Fechar mesmo assim?"
+        ):
+            return
+    tela.destroy()
+
+
+tela.protocol("WM_DELETE_WINDOW", confirmar_fechar_programa)
 
 # Mostra a janela de seleção de projeto ANTES da principal — feito aqui
 # no final porque depende de widgets (frame_capitulos, txt_saida, etc.)

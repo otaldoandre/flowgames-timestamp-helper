@@ -979,6 +979,17 @@ def baixar_transcricao_youtube():
     messagebox.showinfo("Transcrição", "Transcrição baixada com sucesso!")
 
 
+def abrir_pasta_projeto():
+    """Abre a pasta do projeto atual no Explorer do Windows."""
+    if not PASTA_PROJETO_ATUAL:
+        messagebox.showinfo("Aviso", "Nenhum projeto aberto.")
+        return
+    if not os.path.isdir(PASTA_PROJETO_ATUAL):
+        messagebox.showerror("Erro", "A pasta do projeto não existe mais.")
+        return
+    os.startfile(PASTA_PROJETO_ATUAL)
+
+
 def selecionar_transcricao_manual():
     """
     Seleciona a transcrição do episódio explicitamente (em vez de só
@@ -2406,6 +2417,18 @@ btn_trocar_projeto = tk.Button(
     font=("Industry-Black", 9, "bold")
 )
 btn_trocar_projeto.pack(side="left", padx=5)
+
+btn_abrir_pasta_projeto = tk.Button(
+    frame_projeto_ativo,
+    text="📁",
+    command=abrir_pasta_projeto,
+    bg="#FEF500",
+    fg="#7F14B7",
+    font=("Industry-Black", 10),
+    padx=4,
+    pady=0
+)
+btn_abrir_pasta_projeto.pack(side="left", padx=2)
 
 lbl_instrucao = tk.Label(frame_conteudo, text="Cole as timestamps aqui:", bg="#7F14B7", fg="#FEF500", font=("Industry-Black", 12, "bold"))
 lbl_instrucao.pack(pady=10)

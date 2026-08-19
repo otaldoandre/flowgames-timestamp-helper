@@ -32,18 +32,32 @@ def obter_pasta_base():
 
 
 PASTA_BASE = obter_pasta_base()
+print(f"[DIAGNOSTICO 1/8] Pasta base resolvida: {PASTA_BASE}", flush=True)
+
+# Pasta bin/ com ffmpeg.exe, ffprobe.exe e yt-dlp.exe empacotados junto
+# do programa — colocada NO INÍCIO do PATH (não no fim), pra ter
+# prioridade sobre qualquer instalação diferente que já exista na
+# máquina. Assim ninguém precisa instalar/configurar nada à parte;
+# todo o código que já chama esses três programas continua igual.
+PASTA_BIN = os.path.join(PASTA_BASE, "bin")
+if os.path.isdir(PASTA_BIN):
+    os.environ["PATH"] = PASTA_BIN + os.pathsep + os.environ.get("PATH", "")
+print(f"[DIAGNOSTICO 2/8] Pasta bin/ existe? {os.path.isdir(PASTA_BIN)}", flush=True)
 
 from dotenv import load_dotenv
 caminho_env = os.path.join(PASTA_BASE, ".env")
 load_dotenv(caminho_env)
+print(f"[DIAGNOSTICO 3/8] .env carregado (existe? {os.path.exists(caminho_env)})", flush=True)
 
 # Restringe o acesso a e-mails @flowgames.gg — checa ANTES de montar
 # qualquer coisa da interface. Se negar (domínio errado ou login
 # cancelado), fecha o programa aqui mesmo.
 from auth_google import autenticar_usuario
+print("[DIAGNOSTICO 4/8] Vou tentar autenticar agora — se travar aqui, é o login", flush=True)
 
 try:
     _email_autenticado = autenticar_usuario()
+    print(f"[DIAGNOSTICO 5/8] Login OK: {_email_autenticado}", flush=True)
 except Exception as _erro_login:
     _tela_erro_login = tk.Tk()
     _tela_erro_login.withdraw()
@@ -66,10 +80,12 @@ if not _email_autenticado:
     _tela_login.destroy()
     sys.exit(1)
 
+print("[DIAGNOSTICO 6/8] Login passou — importando módulos pesados (rembg, IA, Photoshop)...", flush=True)
 from detectar_capitulos import detectar_capitulos, carregar_transcricao as carregar_transcricao_ia
 from gerar_metadata_capitulo import carregar_json, selecionar_exemplos_few_shot, avaliar_capitulo
 from pipeline_thumbnail import montar_thumbnail_completa
 from PIL import Image, ImageTk
+print("[DIAGNOSTICO 7/8] Módulos pesados importados com sucesso", flush=True)
 
 # Caminhos específicos da máquina — vêm do .env, não hardcoded, porque
 # são diferentes em qualquer PC que não seja o meu (inclusive o do
@@ -578,34 +594,60 @@ def check_ytdlp_installed():
 
 
 def download_youtube_video(url, output_dir):
-    """Baixa o vídeo do YouTube (via yt-dlp) para output_dir e retorna o caminho do arquivo .mp4 baixado."""
+    """
+    Baixa o vídeo do YouTube (via yt-dlp) para output_dir e retorna o
+    caminho do arquivo .mp4 baixado.
+
+    Tenta primeiro com formato específico (melhor mp4+m4a); se falhar
+    — comum quando o YouTube muda proteção contra o yt-dlp, e formato
+    forçado costuma ser o primeiro a quebrar nessas mudanças — tenta
+    de novo com seleção automática (mais resiliente) antes de desistir.
+    """
     output_template = os.path.join(output_dir, "%(title)s.%(ext)s")
 
     txt_saida.insert(tk.END, "Baixando vídeo do YouTube, aguarde...\n")
     txt_saida.see(tk.END)
     tela.update_idletasks()
 
-    cmd = [
-        "yt-dlp",
-        "-f", "bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best",
-        "--merge-output-format", "mp4",
-        "--no-playlist",
-        "-o", output_template,
-        url,
+    formatos_tentativa = [
+        "bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best",  # preferido
+        "best",  # fallback: deixa o yt-dlp escolher sozinho
     ]
 
-    result = subprocess.run(cmd, capture_output=True, text=True)
+    formato_usado = None
+    erro_ultima_tentativa = "Erro desconhecido"
 
-    if result.returncode != 0:
-        erro = result.stderr.strip().splitlines()[-1] if result.stderr.strip() else "Erro desconhecido"
-        messagebox.showerror("Erro", f"Falha ao baixar o vídeo do YouTube:\n{erro}")
+    for i, formato in enumerate(formatos_tentativa):
+        cmd = [
+            "yt-dlp",
+            "-f", formato,
+            "--merge-output-format", "mp4",
+            "--no-playlist",
+            "-o", output_template,
+            url,
+        ]
+        result = subprocess.run(cmd, capture_output=True, text=True)
+
+        if result.returncode == 0:
+            formato_usado = formato
+            break
+
+        erro_ultima_tentativa = result.stderr.strip().splitlines()[-1] if result.stderr.strip() else "Erro desconhecido"
+        if i < len(formatos_tentativa) - 1:
+            txt_saida.insert(tk.END, f"Formato preferido falhou ({erro_ultima_tentativa}), tentando alternativo...\n")
+            txt_saida.see(tk.END)
+            tela.update_idletasks()
+
+    if formato_usado is None:
+        messagebox.showerror("Erro", f"Falha ao baixar o vídeo do YouTube:\n{erro_ultima_tentativa}")
         return None
 
     # Pergunta ao yt-dlp qual seria o nome final do arquivo, para localiza-lo
+    # (usa o MESMO formato que funcionou, senão o nome pode não bater)
     filename_cmd = [
         "yt-dlp",
         "--get-filename",
-        "-f", "bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best",
+        "-f", formato_usado,
         "--merge-output-format", "mp4",
         "--no-playlist",
         "-o", output_template,
@@ -2483,6 +2525,7 @@ def gerar_capitulos_automaticamente():
 
 
 # Configuração da interface
+print("[DIAGNOSTICO 8/8] Chegou até aqui — criando a janela do Tkinter agora...", flush=True)
 tela = tk.Tk()
 print(font.families())
 tela.title("Crie cortes com base nas timestamps!")
@@ -2991,6 +3034,7 @@ tela.protocol("WM_DELETE_WINDOW", confirmar_fechar_programa)
 # Mostra a janela de seleção de projeto ANTES da principal — feito aqui
 # no final porque depende de widgets (frame_capitulos, txt_saida, etc.)
 # que só existem depois de toda a interface principal já montada
+print("[DIAGNOSTICO FINAL] Interface toda montada — abrindo seleção de projeto...", flush=True)
 abrir_janela_selecao_projeto(bloquear=True)
 
 # Inicia a interface

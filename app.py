@@ -98,6 +98,13 @@ CAMINHO_TREINO_IA = os.environ.get("CAMINHO_TREINO_IA", "")
 CAMINHO_TEMPLATE_THUMBNAIL = os.environ.get("CAMINHO_TEMPLATE_THUMBNAIL", "")
 PASTA_SAIDA_THUMBNAILS = os.environ.get("PASTA_SAIDA_THUMBNAILS", "")
 
+# Cookies do YouTube (opcional) — o yt-dlp usa isso pra parecer uma
+# requisição de alguém logado de verdade, o que resolve o erro
+# "HTTP 403: Forbidden" que o YouTube passou a dar com mais frequência
+# em requisições sem login. Só é usado se essa variável estiver
+# preenchida E o arquivo existir — sem ela, comportamento de sempre.
+CAMINHO_COOKIES_YOUTUBE = os.environ.get("COOKIES_YOUTUBE_PATH", "")
+
 _caminhos_obrigatorios = {
     "CAMINHO_TREINO_IA": CAMINHO_TREINO_IA,
     "CAMINHO_TEMPLATE_THUMBNAIL": CAMINHO_TEMPLATE_THUMBNAIL,
@@ -420,6 +427,7 @@ blocos_transcricao_atual = None
 
 LOGO_POSICAO_X = None
 LOGO_POSICAO_Y = None
+LOGO_TAMANHO = 227  # mesmo valor que sempre esteve fixo no render (scale=227:227)
 
 # Pasta do projeto da live atual — None até o usuário definir via
 # "Criar Projeto". Cortes, previews e thumbnails passam a ir pra dentro
@@ -609,6 +617,10 @@ def download_youtube_video(url, output_dir):
     txt_saida.see(tk.END)
     tela.update_idletasks()
 
+    args_cookies = []
+    if CAMINHO_COOKIES_YOUTUBE and os.path.exists(CAMINHO_COOKIES_YOUTUBE):
+        args_cookies = ["--cookies", CAMINHO_COOKIES_YOUTUBE]
+
     formatos_tentativa = [
         "bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best",  # preferido
         "best",  # fallback: deixa o yt-dlp escolher sozinho
@@ -620,6 +632,7 @@ def download_youtube_video(url, output_dir):
     for i, formato in enumerate(formatos_tentativa):
         cmd = [
             "yt-dlp",
+            *args_cookies,
             "-f", formato,
             "--merge-output-format", "mp4",
             "--no-playlist",
@@ -646,6 +659,7 @@ def download_youtube_video(url, output_dir):
     # (usa o MESMO formato que funcionou, senão o nome pode não bater)
     filename_cmd = [
         "yt-dlp",
+        *args_cookies,
         "--get-filename",
         "-f", formato_usado,
         "--merge-output-format", "mp4",
@@ -1366,7 +1380,7 @@ def _gerar_cortes_worker(path, segments, enable_fade_in, enable_fade_out, enable
                     posicao_overlay = "W-w-40:40"
 
                 filter_complex = (
-                    f'"[1:v]scale=227:227[logo];'
+                    f'"[1:v]scale={LOGO_TAMANHO}:{LOGO_TAMANHO}[logo];'
                     f'[0:v]scale=1920:1080,{video_chain}[base];'
                     f'[base][logo]overlay={posicao_overlay}[outv]"'
                 )
@@ -2847,9 +2861,10 @@ lbl_logo.pack(side="left")
 def abrir_posicionador_logo():
     """
     Abre uma janela com um frame do vídeo já resolvido, com a logo por
-    cima — arrasta ela pra posição desejada e clica em "Confirmar
-    posição". Isso substitui ter que editar o código toda vez que quer
-    mudar onde a logo aparece nos cortes.
+    cima — arrasta ela pra posição desejada, ajusta o tamanho no
+    slider, e clica em "Confirmar posição". Isso substitui ter que
+    editar o código toda vez que quer mudar onde/quão grande a logo
+    aparece nos cortes.
     """
     path = get_video_source()
     if not path:
@@ -2896,10 +2911,17 @@ def abrir_posicionador_logo():
 
     img_frame_tk = ImageTk.PhotoImage(img_frame.resize((largura_exibida, altura_exibida)))
 
-    img_logo = Image.open(logo_path_var.get()).convert("RGBA")
-    logo_lado_real = 227  # mesmo tamanho do scale=227:227 usado no ffmpeg
-    logo_lado_exibido = max(1, int(logo_lado_real * escala))
-    img_logo_tk = ImageTk.PhotoImage(img_logo.resize((logo_lado_exibido, logo_lado_exibido)))
+    global LOGO_TAMANHO
+    img_logo_original = Image.open(logo_path_var.get()).convert("RGBA")
+
+    def gerar_imagem_logo_tk(tamanho_real):
+        # Sempre redimensiona a partir da imagem ORIGINAL (não em cima
+        # de uma já redimensionada) — evita perda de qualidade
+        # acumulada conforme o slider é mexido várias vezes
+        lado_exibido = max(1, int(tamanho_real * escala))
+        return ImageTk.PhotoImage(img_logo_original.resize((lado_exibido, lado_exibido)))
+
+    img_logo_tk = gerar_imagem_logo_tk(LOGO_TAMANHO)
 
     janela = tk.Toplevel(tela)
     janela.title("Posicionar logo — arraste pra ajustar")
@@ -2911,11 +2933,12 @@ def abrir_posicionador_logo():
 
     # Posição inicial: usa a já definida antes, ou o padrão antigo
     # (canto superior direito, 40px de margem) se ainda não tiver nenhuma
+    lado_exibido_inicial = max(1, int(LOGO_TAMANHO * escala))
     if LOGO_POSICAO_X is not None and LOGO_POSICAO_Y is not None:
         x_inicial = int(LOGO_POSICAO_X * escala)
         y_inicial = int(LOGO_POSICAO_Y * escala)
     else:
-        x_inicial = largura_exibida - logo_lado_exibido - int(40 * escala)
+        x_inicial = largura_exibida - lado_exibido_inicial - int(40 * escala)
         y_inicial = int(40 * escala)
 
     item_logo = canvas.create_image(x_inicial, y_inicial, anchor="nw", image=img_logo_tk)
@@ -2943,14 +2966,43 @@ def abrir_posicionador_logo():
     )
     lbl_instrucao_arraste.pack(pady=4)
 
+    tamanho_atual = {"valor": LOGO_TAMANHO}
+
+    def ajustar_tamanho(novo_valor_str):
+        novo_tamanho = int(float(novo_valor_str))
+        tamanho_atual["valor"] = novo_tamanho
+        # Redimensiona mantendo o canto superior esquerdo fixo (mesmo
+        # ponto de ancoragem do arraste) — só troca a imagem exibida,
+        # não mexe na posição
+        nova_img_tk = gerar_imagem_logo_tk(novo_tamanho)
+        canvas.itemconfig(item_logo, image=nova_img_tk)
+        canvas.imagem_logo_ref = nova_img_tk  # evita a imagem ser coletada como lixo
+
+    lbl_tamanho = tk.Label(
+        janela, text="Tamanho da logo (px):",
+        font=("Industry-Black", 9)
+    )
+    lbl_tamanho.pack(pady=(8, 0))
+
+    slider_tamanho = tk.Scale(
+        janela, from_=50, to=500, orient="horizontal",
+        length=300, command=ajustar_tamanho
+    )
+    slider_tamanho.set(LOGO_TAMANHO)
+    slider_tamanho.pack(pady=4)
+
     def confirmar():
-        global LOGO_POSICAO_X, LOGO_POSICAO_Y
+        global LOGO_POSICAO_X, LOGO_POSICAO_Y, LOGO_TAMANHO
         x_exibido, y_exibido = canvas.coords(item_logo)
 
         LOGO_POSICAO_X = int(x_exibido / escala)
         LOGO_POSICAO_Y = int(y_exibido / escala)
+        LOGO_TAMANHO = tamanho_atual["valor"]
 
-        txt_saida.insert(tk.END, f"Posição da logo definida: x={LOGO_POSICAO_X}, y={LOGO_POSICAO_Y}\n")
+        txt_saida.insert(
+            tk.END,
+            f"Posição/tamanho da logo definidos: x={LOGO_POSICAO_X}, y={LOGO_POSICAO_Y}, tamanho={LOGO_TAMANHO}px\n"
+        )
         txt_saida.see(tk.END)
 
         if os.path.exists(caminho_frame):

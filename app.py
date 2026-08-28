@@ -628,12 +628,14 @@ def download_youtube_video(url, output_dir):
 
     args_cookies = []
     if CAMINHO_COOKIES_YOUTUBE and os.path.exists(CAMINHO_COOKIES_YOUTUBE):
-        args_cookies = ["--cookies", CAMINHO_COOKIES_YOUTUBE]
-
-    formatos_tentativa = [
-        "bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best",  # preferido
-        "best",  # fallback: deixa o yt-dlp escolher sozinho
-    ]
+        args_cookies = [
+            "--cookies", CAMINHO_COOKIES_YOUTUBE,
+            # Contorno documentado pra um bug ativo do yt-dlp (issue #17389,
+            # ainda aberta): usar cookies puxa um client interno do YouTube
+            # ("tv_downgraded") que anda quebrado com o novo streaming SABR
+            # que o YouTube forçou — força outros clients pra evitar isso.
+            "--extractor-args", "youtube:player_client=tv,default",
+        ]
 
     formato_usado = None
     erro_ultima_tentativa = "Erro desconhecido"
@@ -993,6 +995,113 @@ def extrair_video_id_youtube(url):
     return padrao.group(1) if padrao else None
 
 
+def _parse_tempo_vtt(timestamp_str):
+    """Converte um timestamp de legenda .vtt (HH:MM:SS.mmm ou MM:SS.mmm) pra segundos."""
+    partes = timestamp_str.strip().split(":")
+    if len(partes) == 3:
+        h, m, s = partes
+    else:
+        h = "0"
+        m, s = partes
+    return int(h) * 3600 + int(m) * 60 + float(s)
+
+
+def _converter_vtt_para_blocos(caminho_vtt):
+    """
+    Lê um arquivo .vtt (legenda baixada via yt-dlp) e devolve o texto
+    no mesmo formato [MM:SS] texto que carregar_transcricao_ia() já
+    entende — igual ao que vem da youtube_transcript_api ou colado
+    manualmente.
+
+    Legenda automática do YouTube em .vtt costuma repetir o mesmo
+    texto em vários blocos seguidos (efeito de "legenda crescendo na
+    tela") — pula blocos com texto idêntico ao anterior pra não gerar
+    linhas duplicadas.
+    """
+    with open(caminho_vtt, "r", encoding="utf-8") as f:
+        conteudo = f.read()
+
+    linhas_saida = []
+    blocos = re.split(r"\n\s*\n", conteudo)
+    padrao_tempo = re.compile(r"(?:\d{2}:)?\d{2}:\d{2}\.\d{3}\s*-->\s*(?:\d{2}:)?\d{2}:\d{2}\.\d{3}")
+
+    ultimo_texto = None
+    for bloco in blocos:
+        linhas = bloco.strip().splitlines()
+        if not linhas:
+            continue
+
+        linha_tempo = next((l for l in linhas if padrao_tempo.search(l)), None)
+        if not linha_tempo:
+            continue
+
+        inicio_str = linha_tempo.split("-->")[0].strip()
+        segundos = _parse_tempo_vtt(inicio_str)
+
+        texto_linhas = linhas[linhas.index(linha_tempo) + 1:]
+        texto = " ".join(texto_linhas)
+        texto = re.sub(r"<[^>]+>", "", texto).strip()  # remove tags de tempo/estilo embutidas
+
+        if not texto or texto == ultimo_texto:
+            continue
+        ultimo_texto = texto
+
+        minutos = int(segundos // 60)
+        seg = int(segundos % 60)
+        linhas_saida.append(f"[{minutos:02d}:{seg:02d}] {texto}")
+
+    return "\n".join(linhas_saida)
+
+
+def baixar_transcricao_via_ytdlp_legenda(video_id, url, pasta_destino):
+    """
+    Alternativa via yt-dlp pra quando youtube_transcript_api falha —
+    cobre principalmente vídeo com restrição de idade, que a
+    youtube_transcript_api atualmente NÃO consegue baixar de jeito
+    nenhum (limitação conhecida e assumida pela própria lib:
+    autenticação por cookies está temporariamente quebrada nela, sem
+    previsão de correção). O yt-dlp já lida com cookies normalmente —
+    mesmo mecanismo (CAMINHO_COOKIES_YOUTUBE) usado pra baixar vídeo —
+    então consegue pegar a legenda mesmo em vídeo restrito, desde que
+    os cookies configurados sejam de uma conta com acesso.
+
+    Baixa só a legenda (--skip-download, não baixa o vídeo) e devolve
+    o caminho do .vtt baixado. Levanta exceção se não conseguir.
+    """
+    args_cookies = []
+    if CAMINHO_COOKIES_YOUTUBE and os.path.exists(CAMINHO_COOKIES_YOUTUBE):
+        args_cookies = [
+            "--cookies", CAMINHO_COOKIES_YOUTUBE,
+            # Mesmo contorno de download_youtube_video() — bug ativo do
+            # yt-dlp (issue #17389) entre cookies e o client "tv_downgraded"
+            "--extractor-args", "youtube:player_client=tv,default",
+        ]
+
+    nome_base = os.path.join(pasta_destino, f"legenda_{video_id}")
+
+    cmd = [
+        "yt-dlp",
+        *args_cookies,
+        "--write-auto-sub",
+        "--sub-lang", "pt.*,pt",
+        "--skip-download",
+        "--sub-format", "vtt",
+        "-o", nome_base,
+        url,
+    ]
+    resultado = subprocess.run(cmd, capture_output=True, text=True)
+
+    candidatos = [
+        f for f in os.listdir(pasta_destino)
+        if f.startswith(f"legenda_{video_id}") and f.endswith(".vtt")
+    ]
+    if not candidatos:
+        erro = resultado.stderr.strip().splitlines()[-1] if resultado.stderr.strip() else "arquivo de legenda não encontrado"
+        raise RuntimeError(erro)
+
+    return os.path.join(pasta_destino, candidatos[0])
+
+
 def baixar_transcricao_youtube():
     """
     Baixa a transcrição do vídeo do YouTube linkado na mesma caixa de
@@ -1037,19 +1146,53 @@ def baixar_transcricao_youtube():
         api = YouTubeTranscriptApi()
         transcricao = api.fetch(video_id, languages=["pt"])
     except Exception as e:
-        # A causa mais comum, de longe: legenda automática ainda não foi
-        # gerada — o YouTube demora (às vezes bastante) pra disponibilizar
-        # a legenda de lives grandes logo depois que elas terminam
-        messagebox.showwarning(
-            "Transcrição indisponível",
-            "Não consegui baixar a transcrição desse vídeo agora.\n\n"
-            "Isso é comum logo depois de uma live grande terminar — o "
-            "YouTube pode levar um tempo pra gerar a legenda automática. "
-            "Tenta de novo daqui a pouco.\n\n"
-            f"Detalhe técnico: {e}"
-        )
-        txt_saida.insert(tk.END, f"[ERRO] Falha ao baixar transcrição: {e}\n")
+        # Tenta o plano B (yt-dlp) antes de desistir — cobre principalmente
+        # vídeo com restrição de idade, que a youtube_transcript_api não
+        # consegue baixar de jeito nenhum agora (ver docstring de
+        # baixar_transcricao_via_ytdlp_legenda)
+        txt_saida.insert(tk.END, f"[AVISO] Método normal falhou ({e}) — tentando via yt-dlp...\n")
         txt_saida.see(tk.END)
+        tela.update_idletasks()
+
+        pasta_destino = PASTA_PROJETO_ATUAL or PASTA_BASE
+
+        try:
+            caminho_vtt = baixar_transcricao_via_ytdlp_legenda(video_id, url, pasta_destino)
+            texto_convertido = _converter_vtt_para_blocos(caminho_vtt)
+
+            if not texto_convertido.strip():
+                raise RuntimeError("legenda baixada, mas ficou vazia depois de convertida")
+
+            caminho_arquivo = os.path.join(pasta_destino, f"transcricao_{video_id}.txt")
+            with open(caminho_arquivo, "w", encoding="utf-8") as arquivo:
+                arquivo.write(texto_convertido)
+
+            try:
+                os.remove(caminho_vtt)  # só o .txt convertido fica, o .vtt bruto é descartável
+            except OSError:
+                pass
+
+            caminho_transcricao_atual = caminho_arquivo
+            blocos_transcricao_atual = carregar_transcricao_ia(caminho_arquivo)
+            caminho_transcricao_var.set(caminho_arquivo)
+            salvar_estado_projeto()
+
+            txt_saida.insert(tk.END, f"Transcrição baixada via yt-dlp (plano B) e salva em: {caminho_arquivo}\n")
+            txt_saida.see(tk.END)
+            messagebox.showinfo("Transcrição", "Transcrição baixada com sucesso (via yt-dlp)!")
+        except Exception as e2:
+            messagebox.showwarning(
+                "Transcrição indisponível",
+                "Não consegui baixar a transcrição desse vídeo agora, nem pelo método "
+                "normal nem pelo alternativo (yt-dlp).\n\n"
+                "Isso é comum logo depois de uma live grande terminar (legenda ainda não "
+                "gerada), ou em vídeo com restrição de idade sem cookies de uma conta com "
+                "acesso configurados.\n\n"
+                f"Detalhe técnico (método normal): {e}\n\n"
+                f"Detalhe técnico (yt-dlp): {e2}"
+            )
+            txt_saida.insert(tk.END, f"[ERRO] Falha nos dois métodos: {e} | {e2}\n")
+            txt_saida.see(tk.END)
         return
 
     pasta_destino = PASTA_PROJETO_ATUAL or PASTA_BASE

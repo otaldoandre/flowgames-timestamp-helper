@@ -429,6 +429,15 @@ LOGO_POSICAO_X = None
 LOGO_POSICAO_Y = None
 LOGO_TAMANHO = 227  # mesmo valor que sempre esteve fixo no render (scale=227:227)
 
+# Codificação de vídeo, em ordem de tentativa: GPU primeiro (h264_nvenc,
+# bem mais rápido), CPU como fallback (libx264, mais lento mas nunca
+# depende de driver) — usado quando um corte precisa de render de
+# verdade (fade/logo/endslate), não nos casos de "-c copy" puro.
+ENCODERS_VIDEO_TENTATIVA = [
+    "-c:v h264_nvenc -preset p5 -cq 23",
+    "-c:v libx264 -preset medium -crf 23",
+]
+
 # Pasta do projeto da live atual — None até o usuário definir via
 # "Criar Projeto". Cortes, previews e thumbnails passam a ir pra dentro
 # dela (subpastas cortes/, preview/, thumbnail/) em vez de pastas
@@ -1329,6 +1338,9 @@ def _gerar_cortes_worker(path, segments, enable_fade_in, enable_fade_out, enable
                 or enable_endslate
                 or enable_logo
         )
+
+        caminho_saida_final = os.path.join(pasta_destino, f"{title}.mp4")
+
         if not needs_render:
             if end:
                 cmd = (
@@ -1346,6 +1358,8 @@ def _gerar_cortes_worker(path, segments, enable_fade_in, enable_fade_out, enable
                     f'-c copy '
                     f'"{title}.mp4"'
                 )
+            codigo_saida = executar_comando_cancelavel(cmd)
+            print(cmd)
         else:
             # Habilita o render do input p/ o input (uso do fade-in e fadeout):
             # Aviso: o fade-in e fade-out não funcionam no último clipe
@@ -1407,85 +1421,98 @@ def _gerar_cortes_worker(path, segments, enable_fade_in, enable_fade_out, enable
 
             else:
                 input_logo = ""
-            ## Render
-            if end:
-                cmd_render = (
-                    f'ffmpeg -y '
-                    f'-ss {start} '
-                    f'-i "{path}" '
-                    f'{input_logo} '
-                    f'-t {duration_str} '
-                    f'{filter_complex_cmd} '
-                    f'{map_video} '
-                    f'-map 0:a '
-                    f'-c:v h264_nvenc '
-                    f'-preset p5 '
-                    f'-cq 23 '
-                    f'-c:a copy '
-                    f'"{temp_output}"'
-                )
 
-            else:
-                cmd_render = (
-                    f'ffmpeg -y '
-                    f'-ss {start} '
-                    f'-i "{path}" '
-                    f'{input_logo} '
-                    f'{filter_complex_cmd} '
-                    f'{map_video} '
-                    f'-map 0:a '
-                    f'-c:v h264_nvenc '
-                    f'-preset p5 '
-                    f'-cq 23 '
-                    f'-c:a copy '
-                    f'"{temp_output}"'
-                )
-            if not enable_endslate:
+            # Tenta primeiro pela GPU (h264_nvenc, bem mais rápido) — se
+            # falhar (comum quando o driver da NVIDIA tá desatualizado
+            # pra versão do ffmpeg em uso — "Driver does not support the
+            # required nvenc API version"), cai pra codificação por
+            # processador (libx264), que não depende de driver nenhum.
+            # Assim não trava nem pra mim nem pro colega se algum driver
+            # estiver atrasado — só fica mais lento nesse caso.
+            codigo_saida = None
+            for indice_encoder, codec_args in enumerate(ENCODERS_VIDEO_TENTATIVA):
+                ## Render
+                if end:
+                    cmd_render = (
+                        f'ffmpeg -y '
+                        f'-ss {start} '
+                        f'-i "{path}" '
+                        f'{input_logo} '
+                        f'-t {duration_str} '
+                        f'{filter_complex_cmd} '
+                        f'{map_video} '
+                        f'-map 0:a '
+                        f'{codec_args} '
+                        f'-c:a copy '
+                        f'"{temp_output}"'
+                    )
 
-                final_output = f"{title}.mp4"
+                else:
+                    cmd_render = (
+                        f'ffmpeg -y '
+                        f'-ss {start} '
+                        f'-i "{path}" '
+                        f'{input_logo} '
+                        f'{filter_complex_cmd} '
+                        f'{map_video} '
+                        f'-map 0:a '
+                        f'{codec_args} '
+                        f'-c:a copy '
+                        f'"{temp_output}"'
+                    )
+                if not enable_endslate:
 
-                cmd_finalize = (
-                    f'ffmpeg -y '
-                    f'-i "{temp_output}" '
-                    f'-c copy '
-                    f'"{final_output}"'
-                )
+                    final_output = f"{title}.mp4"
 
-                cmd = (
-                        cmd_render
-                        + " && " +
-                        cmd_finalize
-                )
-            # Se tiver endslate
-            else:
+                    cmd_finalize = (
+                        f'ffmpeg -y '
+                        f'-i "{temp_output}" '
+                        f'-c copy '
+                        f'"{final_output}"'
+                    )
 
-                final_output = f"{title}.mp4"
+                    cmd = (
+                            cmd_render
+                            + " && " +
+                            cmd_finalize
+                    )
+                # Se tiver endslate
+                else:
 
-                cmd_concat = (
-                    f'ffmpeg -y '
-                    f'-i "{temp_output}" '
-                    f'-i "{endslate_path}" '
-                    f'-filter_complex '
-                    f'"[0:v][0:a][1:v][1:a]'
-                    f'concat=n=2:v=1:a=1[v][a]" '
-                    f'-map "[v]" '
-                    f'-map "[a]" '
-                    f'-c:v h264_nvenc '
-                    f'-preset p5 '
-                    f'-cq 23 '
-                    f'"{final_output}"'
-                )
+                    final_output = f"{title}.mp4"
 
-                cmd = (
-                        cmd_render
-                        + " && " +
-                        cmd_concat
-                )
+                    cmd_concat = (
+                        f'ffmpeg -y '
+                        f'-i "{temp_output}" '
+                        f'-i "{endslate_path}" '
+                        f'-filter_complex '
+                        f'"[0:v][0:a][1:v][1:a]'
+                        f'concat=n=2:v=1:a=1[v][a]" '
+                        f'-map "[v]" '
+                        f'-map "[a]" '
+                        f'{codec_args} '
+                        f'"{final_output}"'
+                    )
 
-        caminho_saida_final = os.path.join(pasta_destino, f"{title}.mp4")
+                    cmd = (
+                            cmd_render
+                            + " && " +
+                            cmd_concat
+                    )
 
-        codigo_saida = executar_comando_cancelavel(cmd)
-        print(cmd)
+                codigo_saida = executar_comando_cancelavel(cmd)
+                print(cmd)
+
+                if codigo_saida == 0 and os.path.exists(caminho_saida_final):
+                    break  # deu certo, não precisa tentar o próximo encoder
+
+                if _cancelar_geracao["solicitado"]:
+                    break  # cancelado no meio — não adianta tentar outro encoder
+
+                if indice_encoder < len(ENCODERS_VIDEO_TENTATIVA) - 1:
+                    tela.after(0, lambda t=title: txt_saida.insert(
+                        tk.END, f"\"{t}\": falha codificando pela GPU, tentando pelo processador (mais lento)...\n"
+                    ))
 
         if _cancelar_geracao["solicitado"]:
             status = "cancelado"

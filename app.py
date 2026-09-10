@@ -1304,6 +1304,62 @@ def abrir_pasta_projeto():
     os.startfile(PASTA_PROJETO_ATUAL)
 
 
+def _parece_transcricao_youtube_colada(texto):
+    """
+    Detecta se o texto está no formato bagunçado que sai ao copiar
+    direto do painel "Mostrar transcrição" do YouTube — timestamp curto
+    (ex: "7:29") seguido, sem separador nenhum, do mesmo tempo escrito
+    por extenso pra acessibilidade (ex: "7 minutes, 29 seconds"), e só
+    depois o texto de verdade. Diferente do formato [MM:SS] que o
+    programa usa normalmente.
+    """
+    if re.match(r"^\[\d{1,4}:\d{2}\]", texto.strip()):
+        return False  # já está no formato certo, não precisa converter
+
+    padrao_prefixo = re.compile(
+        r"(?:\d{1,2}:)?\d{1,2}:\d{2}(?:\d+\s*(?:hours?|minutes?|seconds?),?\s*)+"
+    )
+    # Pelo menos 2 ocorrências — evita falso positivo em texto solto
+    # que por acaso mencione algo tipo "5 minutes" no meio da fala
+    return len(padrao_prefixo.findall(texto)) >= 2
+
+
+def _converter_transcricao_youtube_colada(texto_colado):
+    """
+    Converte o texto colado do painel de transcrição do YouTube pro
+    formato [MM:SS] texto que o resto do pipeline (carregar_transcricao_ia)
+    já espera.
+    """
+    padrao_prefixo = re.compile(
+        r"((?:\d{1,2}:)?\d{1,2}:\d{2})"
+        r"(?:\d+\s*(?:hours?|minutes?|seconds?),?\s*)+"
+    )
+
+    matches = list(padrao_prefixo.finditer(texto_colado))
+    linhas_saida = []
+    for i, m in enumerate(matches):
+        timestamp_curto = m.group(1)
+        inicio_texto = m.end()
+        fim_texto = matches[i + 1].start() if i + 1 < len(matches) else len(texto_colado)
+        texto = texto_colado[inicio_texto:fim_texto].strip().replace("\n", " ")
+        if not texto:
+            continue
+
+        partes = timestamp_curto.split(":")
+        if len(partes) == 3:
+            h, mn, s = int(partes[0]), int(partes[1]), int(partes[2])
+        else:
+            h = 0
+            mn, s = int(partes[0]), int(partes[1])
+        total_segundos = h * 3600 + mn * 60 + s
+        minutos_totais = total_segundos // 60
+        segundos_totais = total_segundos % 60
+
+        linhas_saida.append(f"[{minutos_totais:02d}:{segundos_totais:02d}] {texto}")
+
+    return "\n".join(linhas_saida)
+
+
 def selecionar_transcricao_manual():
     """
     Seleciona a transcrição do episódio explicitamente (em vez de só
@@ -1311,6 +1367,11 @@ def selecionar_transcricao_manual():
     ou "Thumbnail" precisam dela). Reaproveitada tanto pelo botão
     quanto por obter_metadata_ia_do_capitulo() quando ainda não tem
     nenhuma selecionada.
+
+    Se o arquivo escolhido estiver no formato bagunçado que sai ao
+    colar a transcrição copiada direto do YouTube (timestamp curto +
+    rótulo por extenso grudados), converte automaticamente pro formato
+    [MM:SS] antes de carregar — não precisa fazer isso na mão.
     """
     global caminho_transcricao_atual, blocos_transcricao_atual
 
@@ -1320,6 +1381,30 @@ def selecionar_transcricao_manual():
     )
     if not caminho:
         return
+
+    try:
+        with open(caminho, "r", encoding="utf-8") as f:
+            conteudo = f.read()
+    except OSError as e:
+        messagebox.showerror("Erro", f"Não consegui ler o arquivo:\n{e}")
+        return
+
+    if _parece_transcricao_youtube_colada(conteudo):
+        conteudo_convertido = _converter_transcricao_youtube_colada(conteudo)
+        if conteudo_convertido.strip():
+            try:
+                with open(caminho, "w", encoding="utf-8") as f:
+                    f.write(conteudo_convertido)
+                txt_saida.insert(
+                    tk.END,
+                    "Detectei transcrição colada do YouTube — convertida pro formato certo automaticamente.\n"
+                )
+                txt_saida.see(tk.END)
+            except OSError as e:
+                messagebox.showwarning(
+                    "Aviso",
+                    f"Detectei o formato do YouTube, mas não consegui salvar convertido:\n{e}"
+                )
 
     caminho_transcricao_atual = caminho
     blocos_transcricao_atual = carregar_transcricao_ia(caminho)

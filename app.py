@@ -677,12 +677,18 @@ def download_youtube_video(url, output_dir):
     — comum quando o YouTube muda proteção contra o yt-dlp, e formato
     forçado costuma ser o primeiro a quebrar nessas mudanças — tenta
     de novo com seleção automática (mais resiliente) antes de desistir.
+
+    Chamada de dentro de uma thread de trabalho (ver resolver_video) —
+    subprocess.run do yt-dlp é bloqueante e pode levar minutos numa live
+    longa, então NENHUM toque em widget aqui é direto: tudo passa por
+    tela.after(0, ...), mesmo padrão já usado em _gerar_cortes_worker.
     """
     output_template = os.path.join(output_dir, "%(title)s.%(ext)s")
 
-    txt_saida.insert(tk.END, "Baixando vídeo do YouTube, aguarde...\n")
-    txt_saida.see(tk.END)
-    tela.update_idletasks()
+    def log(msg):
+        tela.after(0, lambda: (txt_saida.insert(tk.END, msg), txt_saida.see(tk.END)))
+
+    log("Baixando vídeo do YouTube, aguarde...\n")
 
     args_cookies = []
     if CAMINHO_COOKIES_YOUTUBE and os.path.exists(CAMINHO_COOKIES_YOUTUBE):
@@ -720,12 +726,10 @@ def download_youtube_video(url, output_dir):
 
         erro_ultima_tentativa = result.stderr.strip().splitlines()[-1] if result.stderr.strip() else "Erro desconhecido"
         if i < len(formatos_tentativa) - 1:
-            txt_saida.insert(tk.END, f"Formato preferido falhou ({erro_ultima_tentativa}), tentando alternativo...\n")
-            txt_saida.see(tk.END)
-            tela.update_idletasks()
+            log(f"Formato preferido falhou ({erro_ultima_tentativa}), tentando alternativo...\n")
 
     if formato_usado is None:
-        messagebox.showerror("Erro", f"Falha ao baixar o vídeo do YouTube:\n{erro_ultima_tentativa}")
+        tela.after(0, lambda: messagebox.showerror("Erro", f"Falha ao baixar o vídeo do YouTube:\n{erro_ultima_tentativa}"))
         return None
 
     # Pergunta ao yt-dlp qual seria o nome final do arquivo, para localiza-lo
@@ -747,14 +751,12 @@ def download_youtube_video(url, output_dir):
         # Fallback: pega o .mp4 mais recente na pasta de download
         mp4_files = [f for f in os.listdir(output_dir) if f.lower().endswith(".mp4")]
         if not mp4_files:
-            messagebox.showerror("Erro", "O download terminou, mas o arquivo baixado não foi encontrado.")
+            tela.after(0, lambda: messagebox.showerror("Erro", "O download terminou, mas o arquivo baixado não foi encontrado."))
             return None
         mp4_files.sort(key=lambda f: os.path.getmtime(os.path.join(output_dir, f)), reverse=True)
         filepath = os.path.join(output_dir, mp4_files[0])
 
-    txt_saida.insert(tk.END, f"Download concluído: {os.path.basename(filepath)}\n")
-    txt_saida.see(tk.END)
-    tela.update_idletasks()
+    log(f"Download concluído: {os.path.basename(filepath)}\n")
 
     return filepath
 
@@ -1030,6 +1032,10 @@ def resolver_video():
 
     Se um projeto estiver ativo, o download vai direto pra pasta dele —
     só pergunta a pasta se não tiver nenhum projeto aberto.
+
+    O download em si roda numa thread separada — pra uma live longa isso
+    pode levar minutos, e rodando direto na thread principal a janela
+    congelava (não respondia a clique nenhum) até terminar.
     """
     youtube_url = youtube_link_var.get().strip()
 
@@ -1054,10 +1060,24 @@ def resolver_video():
                 messagebox.showerror("Erro", "Nenhuma pasta selecionada! Tente novamente.")
                 return
 
-        filepath = download_youtube_video(youtube_url, download_dir)
-        if filepath:
-            video_path_var.set(filepath)
-            salvar_estado_projeto()
+        btn_resolver_video.config(state="disabled")
+
+        def _worker():
+            try:
+                filepath = download_youtube_video(youtube_url, download_dir)
+            except Exception as e:
+                tela.after(0, lambda: messagebox.showerror("Erro", f"Falha ao baixar o vídeo:\n{e}"))
+                filepath = None
+
+            def _concluir():
+                if filepath:
+                    video_path_var.set(filepath)
+                    salvar_estado_projeto()
+                btn_resolver_video.config(state="normal")
+
+            tela.after(0, _concluir)
+
+        threading.Thread(target=_worker, daemon=True).start()
 
     else:
         path = filedialog.askopenfilename(
@@ -1192,9 +1212,11 @@ def baixar_transcricao_youtube():
     Salva no mesmo formato [MM:SS] que o resto do pipeline já usa, e
     define como a transcrição atual do projeto (igual selecionar
     manualmente faria).
-    """
-    global caminho_transcricao_atual, blocos_transcricao_atual
 
+    O download (e o fallback via yt-dlp) roda numa thread separada —
+    sem isso a janela ficava congelada até a transcrição terminar de
+    baixar (podia levar bastante tempo, principalmente no fallback).
+    """
     url = youtube_link_var.get().strip()
     if not url:
         messagebox.showerror(
@@ -1218,81 +1240,94 @@ def baixar_transcricao_youtube():
         )
         return
 
-    txt_saida.insert(tk.END, "Baixando transcrição do YouTube, aguarde...\n")
-    txt_saida.see(tk.END)
-    tela.update_idletasks()
+    btn_baixar_transcricao.config(state="disabled")
 
-    try:
-        api = YouTubeTranscriptApi()
-        transcricao = api.fetch(video_id, languages=["pt"])
-    except Exception as e:
-        # Tenta o plano B (yt-dlp) antes de desistir — cobre principalmente
-        # vídeo com restrição de idade, que a youtube_transcript_api não
-        # consegue baixar de jeito nenhum agora (ver docstring de
-        # baixar_transcricao_via_ytdlp_legenda)
-        txt_saida.insert(tk.END, f"[AVISO] Método normal falhou ({e}) — tentando via yt-dlp...\n")
-        txt_saida.see(tk.END)
-        tela.update_idletasks()
+    def log(msg):
+        tela.after(0, lambda: (txt_saida.insert(tk.END, msg), txt_saida.see(tk.END)))
 
+    log("Baixando transcrição do YouTube, aguarde...\n")
+
+    def _worker():
         pasta_destino = PASTA_PROJETO_ATUAL or PASTA_BASE
 
         try:
-            caminho_vtt = baixar_transcricao_via_ytdlp_legenda(video_id, url, pasta_destino)
-            texto_convertido = _converter_vtt_para_blocos(caminho_vtt)
-
-            if not texto_convertido.strip():
-                raise RuntimeError("legenda baixada, mas ficou vazia depois de convertida")
-
-            caminho_arquivo = os.path.join(pasta_destino, f"transcricao_{video_id}.txt")
-            with open(caminho_arquivo, "w", encoding="utf-8") as arquivo:
-                arquivo.write(texto_convertido)
+            api = YouTubeTranscriptApi()
+            transcricao = api.fetch(video_id, languages=["pt"])
+        except Exception as e:
+            # Tenta o plano B (yt-dlp) antes de desistir — cobre principalmente
+            # vídeo com restrição de idade, que a youtube_transcript_api não
+            # consegue baixar de jeito nenhum agora (ver docstring de
+            # baixar_transcricao_via_ytdlp_legenda)
+            log(f"[AVISO] Método normal falhou ({e}) — tentando via yt-dlp...\n")
 
             try:
-                os.remove(caminho_vtt)  # só o .txt convertido fica, o .vtt bruto é descartável
-            except OSError:
-                pass
+                caminho_vtt = baixar_transcricao_via_ytdlp_legenda(video_id, url, pasta_destino)
+                texto_convertido = _converter_vtt_para_blocos(caminho_vtt)
 
+                if not texto_convertido.strip():
+                    raise RuntimeError("legenda baixada, mas ficou vazia depois de convertida")
+
+                caminho_arquivo = os.path.join(pasta_destino, f"transcricao_{video_id}.txt")
+                with open(caminho_arquivo, "w", encoding="utf-8") as arquivo:
+                    arquivo.write(texto_convertido)
+
+                try:
+                    os.remove(caminho_vtt)  # só o .txt convertido fica, o .vtt bruto é descartável
+                except OSError:
+                    pass
+
+                def _concluir_via_ytdlp():
+                    global caminho_transcricao_atual, blocos_transcricao_atual
+                    caminho_transcricao_atual = caminho_arquivo
+                    blocos_transcricao_atual = carregar_transcricao_ia(caminho_arquivo)
+                    caminho_transcricao_var.set(caminho_arquivo)
+                    salvar_estado_projeto()
+                    txt_saida.insert(tk.END, f"Transcrição baixada via yt-dlp (plano B) e salva em: {caminho_arquivo}\n")
+                    txt_saida.see(tk.END)
+                    btn_baixar_transcricao.config(state="normal")
+                    messagebox.showinfo("Transcrição", "Transcrição baixada com sucesso (via yt-dlp)!")
+
+                tela.after(0, _concluir_via_ytdlp)
+            except Exception as e2:
+                def _falhou():
+                    txt_saida.insert(tk.END, f"[ERRO] Falha nos dois métodos: {e} | {e2}\n")
+                    txt_saida.see(tk.END)
+                    btn_baixar_transcricao.config(state="normal")
+                    messagebox.showwarning(
+                        "Transcrição indisponível",
+                        "Não consegui baixar a transcrição desse vídeo agora, nem pelo método "
+                        "normal nem pelo alternativo (yt-dlp).\n\n"
+                        "Isso é comum logo depois de uma live grande terminar (legenda ainda não "
+                        "gerada), ou em vídeo com restrição de idade sem cookies de uma conta com "
+                        "acesso configurados.\n\n"
+                        f"Detalhe técnico (método normal): {e}\n\n"
+                        f"Detalhe técnico (yt-dlp): {e2}"
+                    )
+                tela.after(0, _falhou)
+            return
+
+        caminho_arquivo = os.path.join(pasta_destino, f"transcricao_{video_id}.txt")
+        with open(caminho_arquivo, "w", encoding="utf-8") as arquivo:
+            for bloco in transcricao:
+                minutos = int(bloco.start // 60)
+                segundos = int(bloco.start % 60)
+                texto_limpo = bloco.text.replace("\n", " ").strip()
+                arquivo.write(f"[{minutos:02d}:{segundos:02d}] {texto_limpo}\n")
+
+        def _concluir():
+            global caminho_transcricao_atual, blocos_transcricao_atual
             caminho_transcricao_atual = caminho_arquivo
             blocos_transcricao_atual = carregar_transcricao_ia(caminho_arquivo)
             caminho_transcricao_var.set(caminho_arquivo)
             salvar_estado_projeto()
-
-            txt_saida.insert(tk.END, f"Transcrição baixada via yt-dlp (plano B) e salva em: {caminho_arquivo}\n")
+            txt_saida.insert(tk.END, f"Transcrição baixada e salva em: {caminho_arquivo}\n")
             txt_saida.see(tk.END)
-            messagebox.showinfo("Transcrição", "Transcrição baixada com sucesso (via yt-dlp)!")
-        except Exception as e2:
-            messagebox.showwarning(
-                "Transcrição indisponível",
-                "Não consegui baixar a transcrição desse vídeo agora, nem pelo método "
-                "normal nem pelo alternativo (yt-dlp).\n\n"
-                "Isso é comum logo depois de uma live grande terminar (legenda ainda não "
-                "gerada), ou em vídeo com restrição de idade sem cookies de uma conta com "
-                "acesso configurados.\n\n"
-                f"Detalhe técnico (método normal): {e}\n\n"
-                f"Detalhe técnico (yt-dlp): {e2}"
-            )
-            txt_saida.insert(tk.END, f"[ERRO] Falha nos dois métodos: {e} | {e2}\n")
-            txt_saida.see(tk.END)
-        return
+            btn_baixar_transcricao.config(state="normal")
+            messagebox.showinfo("Transcrição", "Transcrição baixada com sucesso!")
 
-    pasta_destino = PASTA_PROJETO_ATUAL or PASTA_BASE
-    caminho_arquivo = os.path.join(pasta_destino, f"transcricao_{video_id}.txt")
+        tela.after(0, _concluir)
 
-    with open(caminho_arquivo, "w", encoding="utf-8") as arquivo:
-        for bloco in transcricao:
-            minutos = int(bloco.start // 60)
-            segundos = int(bloco.start % 60)
-            texto_limpo = bloco.text.replace("\n", " ").strip()
-            arquivo.write(f"[{minutos:02d}:{segundos:02d}] {texto_limpo}\n")
-
-    caminho_transcricao_atual = caminho_arquivo
-    blocos_transcricao_atual = carregar_transcricao_ia(caminho_arquivo)
-    caminho_transcricao_var.set(caminho_arquivo)
-    salvar_estado_projeto()
-
-    txt_saida.insert(tk.END, f"Transcrição baixada e salva em: {caminho_arquivo}\n")
-    txt_saida.see(tk.END)
-    messagebox.showinfo("Transcrição", "Transcrição baixada com sucesso!")
+    threading.Thread(target=_worker, daemon=True).start()
 
 
 def encontrar_janela_explorer_aberta(caminho_pasta):
@@ -2800,6 +2835,11 @@ def gerar_capitulos_automaticamente():
     pra cada um — preenche a caixa de timestamps sozinho, como
     alternativa a colar manualmente. Depois é só clicar em "Carregar
     capítulos" normal, igual sempre já fazia.
+
+    Roda em background — detectar capítulos (carrega um modelo de
+    embeddings na primeira vez) e gerar título com IA capítulo por
+    capítulo pode levar bastante tempo num episódio longo, e isso não
+    pode travar a janela.
     """
     caminho_transcricao = filedialog.askopenfilename(
         title="Selecione a transcrição do episódio",
@@ -2808,69 +2848,83 @@ def gerar_capitulos_automaticamente():
     if not caminho_transcricao:
         return
 
-    txt_saida.insert(tk.END, "Detectando capítulos automaticamente...\n")
-    txt_saida.see(tk.END)
-    tela.update_idletasks()
+    btn_gerar_automatico.config(state="disabled")
 
-    blocos = carregar_transcricao_ia(caminho_transcricao)
-    fronteiras = sorted(detectar_capitulos(caminho_transcricao))
+    def log(msg):
+        tela.after(0, lambda: (txt_saida.insert(tk.END, msg), txt_saida.see(tk.END)))
 
-    if not fronteiras:
-        messagebox.showinfo("Aviso", "Nenhum capítulo detectado nessa transcrição.")
-        return
+    log("Detectando capítulos automaticamente...\n")
 
-    fim_transcricao = max((b["seconds"] for b in blocos), default=0) + 1
+    def _worker():
+        blocos = carregar_transcricao_ia(caminho_transcricao)
+        fronteiras = sorted(detectar_capitulos(caminho_transcricao))
 
-    txt_saida.insert(tk.END, f"{len(fronteiras)} capítulos detectados. Gerando título com IA...\n")
-    txt_saida.see(tk.END)
-    tela.update_idletasks()
+        if not fronteiras:
+            def _sem_capitulos():
+                btn_gerar_automatico.config(state="normal")
+                messagebox.showinfo("Aviso", "Nenhum capítulo detectado nessa transcrição.")
+            tela.after(0, _sem_capitulos)
+            return
 
-    treino = carregar_json(CAMINHO_TREINO_IA)
-    exemplos = selecionar_exemplos_few_shot(treino, programa=PROGRAMA_PROJETO_ATUAL)
+        fim_transcricao = max((b["seconds"] for b in blocos), default=0) + 1
 
-    metadata_ia.clear()
-    linhas_timestamp = []
+        log(f"{len(fronteiras)} capítulos detectados. Gerando título com IA...\n")
 
-    for i, inicio in enumerate(fronteiras):
-        fim = fronteiras[i + 1] if i + 1 < len(fronteiras) else fim_transcricao
-        texto = " ".join(b["text"] for b in blocos if inicio <= b["seconds"] < fim)
+        treino = carregar_json(CAMINHO_TREINO_IA)
+        exemplos = selecionar_exemplos_few_shot(treino, programa=PROGRAMA_PROJETO_ATUAL)
 
-        h, resto = divmod(int(inicio), 3600)
-        m, s = divmod(resto, 60)
-        timestamp_str = f"{h:02d}:{m:02d}:{s:02d}"
+        metadata_ia.clear()
+        linhas_timestamp = []
+        erro_parou = None
 
-        titulo = "Sem titulo"
-        if texto.strip():
-            try:
-                avaliacao = avaliar_capitulo({"texto": texto, "programa": PROGRAMA_PROJETO_ATUAL}, exemplos)
-            except Exception as e:
+        for i, inicio in enumerate(fronteiras):
+            fim = fronteiras[i + 1] if i + 1 < len(fronteiras) else fim_transcricao
+            texto = " ".join(b["text"] for b in blocos if inicio <= b["seconds"] < fim)
+
+            h, resto = divmod(int(inicio), 3600)
+            m, s = divmod(resto, 60)
+            timestamp_str = f"{h:02d}:{m:02d}:{s:02d}"
+
+            titulo = "Sem titulo"
+            if texto.strip():
+                try:
+                    avaliacao = avaliar_capitulo({"texto": texto, "programa": PROGRAMA_PROJETO_ATUAL}, exemplos)
+                except Exception as e:
+                    erro_parou = (e, i)
+                    break
+                if avaliacao and avaliacao.get("titulo"):
+                    titulo = avaliacao["titulo"]
+                    chave_metadata = f"{i + 1}-" + get_clean_title(titulo)
+                    metadata_ia[chave_metadata] = avaliacao
+
+            linhas_timestamp.append(f"{timestamp_str} - {titulo}")
+            log(f"  [{i + 1}/{len(fronteiras)}] {timestamp_str} - {titulo}\n")
+
+        def _concluir():
+            btn_gerar_automatico.config(state="normal")
+
+            if erro_parou:
+                e, i = erro_parou
                 messagebox.showerror(
                     "Erro na IA",
                     f"Não consegui gerar os títulos:\n\n{e}\n\n"
                     "Confere se a GEMINI_API_KEY no .env está certa.\n\n"
                     f"Parando aqui — {i} de {len(fronteiras)} capítulos já foram processados."
                 )
-                break
-            if avaliacao and avaliacao.get("titulo"):
-                titulo = avaliacao["titulo"]
-                chave_metadata = f"{i + 1}-" + get_clean_title(titulo)
-                metadata_ia[chave_metadata] = avaliacao
 
-        linhas_timestamp.append(f"{timestamp_str} - {titulo}")
+            txt_entrada.delete("1.0", tk.END)
+            txt_entrada.insert("1.0", "\n".join(linhas_timestamp))
 
-        txt_saida.insert(tk.END, f"  [{i + 1}/{len(fronteiras)}] {timestamp_str} - {titulo}\n")
-        txt_saida.see(tk.END)
-        tela.update_idletasks()
+            txt_saida.insert(
+                tk.END,
+                "\nCapítulos gerados! Clique em \"Carregar capítulos\" pra montar a lista de corte/preview.\n"
+            )
+            txt_saida.see(tk.END)
+            salvar_estado_projeto()
 
-    txt_entrada.delete("1.0", tk.END)
-    txt_entrada.insert("1.0", "\n".join(linhas_timestamp))
+        tela.after(0, _concluir)
 
-    txt_saida.insert(
-        tk.END,
-        "\nCapítulos gerados! Clique em \"Carregar capítulos\" pra montar a lista de corte/preview.\n"
-    )
-    txt_saida.see(tk.END)
-    salvar_estado_projeto()
+    threading.Thread(target=_worker, daemon=True).start()
 
 
 # Configuração da interface

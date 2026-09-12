@@ -445,6 +445,63 @@ ENCODERS_VIDEO_TENTATIVA = [
 # funciona (compatibilidade, não trava quem não configurar isso).
 PASTA_PROJETO_ATUAL = None
 
+# Programa do projeto atual (ex: "FLOW GAMES NEWS", "flow_games") —
+# mesmos nomes usados em coletar_dados_episodios.py (PLAYLISTS) e
+# propagados até fase2_treino.json/fase2_teste.json. Usado pra
+# selecionar_exemplos_few_shot() preferir exemplos do mesmo programa e
+# pra montar_prompt() injetar o perfil certo (PERFIS_PROGRAMA em
+# gerar_metadata_capitulo.py). None = comportamento antigo (pool
+# genérico), não trava quem não escolher/tiver projeto sem programa.
+PROGRAMA_PROJETO_ATUAL = None
+
+PROGRAMAS_CONHECIDOS = [
+    "FLOW GAMES NEWS",
+    "flow_games",
+    "EVENTOS",
+    "GAMEPLAY",
+    "RESET",
+    "RANKING FLOW GAMES",
+    "TOP AO FLOP",
+    "FLOW GAMES AWARDS",
+]
+
+
+def pedir_programa_projeto(programa_atual=None):
+    """
+    Janelinha modal pra escolher de qual programa é o projeto atual.
+    Sem isso, gerar_metadata_capitulo.py não sabe qual perfil/exemplos
+    few-shot por programa usar e sempre cai no pool genérico. Retorna a
+    string escolhida (sempre uma de PROGRAMAS_CONHECIDOS — o combo é
+    readonly, não dá pra digitar algo fora da lista).
+    """
+    escolha = {"programa": None}
+
+    janela = tk.Toplevel(tela)
+    janela.title("Programa do projeto")
+    janela.configure(bg="#7F14B7")
+    janela.geometry("440x180")
+    janela.grab_set()
+
+    tk.Label(
+        janela,
+        text="De qual programa é esse projeto?\n(a IA usa isso pra escolher exemplos/perfil certos)",
+        bg="#7F14B7", fg="#FEF500", font=("Industry-Black", 11, "bold"), justify="center"
+    ).pack(pady=(20, 10))
+
+    combo = Combobox(janela, state="readonly", width=30, values=PROGRAMAS_CONHECIDOS)
+    combo.pack(pady=5)
+    combo.set(programa_atual if programa_atual in PROGRAMAS_CONHECIDOS else PROGRAMAS_CONHECIDOS[0])
+
+    def _confirmar():
+        escolha["programa"] = combo.get()
+        janela.destroy()
+
+    janela.protocol("WM_DELETE_WINDOW", _confirmar)  # fechar sem clicar OK também confirma o que tá selecionado
+    tk.Button(janela, text="OK", command=_confirmar).pack(pady=15)
+
+    janela.wait_window()
+    return escolha["programa"]
+
 # Registro de todos os projetos já criados (nome, pasta, última vez
 # aberto) — fica ao lado do app.py, não da pasta atual de trabalho, pra
 # sempre ser encontrado independente de onde o programa é executado.
@@ -500,6 +557,7 @@ def salvar_estado_projeto():
         "video_path": video_path_var.get(),
         "caminho_transcricao": caminho_transcricao_atual or "",
         "metadata_ia": metadata_ia,
+        "programa": PROGRAMA_PROJETO_ATUAL,
     }
 
     try:
@@ -640,6 +698,10 @@ def download_youtube_video(url, output_dir):
     formato_usado = None
     erro_ultima_tentativa = "Erro desconhecido"
 
+    formatos_tentativa = [
+        "bv*[height<=1080][vcodec^=avc1][ext=mp4]+ba[ext=m4a]/b[height<=1080][vcodec^=avc1][ext=mp4]",
+        "bv*[height<=1080][ext=mp4]+ba[ext=m4a]/b[height<=1080][ext=mp4]",
+    ]
     for i, formato in enumerate(formatos_tentativa):
         cmd = [
             "yt-dlp",
@@ -711,7 +773,7 @@ def criar_novo_projeto():
     o projeto na lista, e limpa a tela pra começar do zero (um projeto
     novo não carrega progresso de outro).
     """
-    global PASTA_PROJETO_ATUAL, caminho_transcricao_atual, blocos_transcricao_atual
+    global PASTA_PROJETO_ATUAL, PROGRAMA_PROJETO_ATUAL, caminho_transcricao_atual, blocos_transcricao_atual
 
     nome_projeto = simpledialog.askstring(
         "Nome do projeto",
@@ -729,6 +791,7 @@ def criar_novo_projeto():
 
     PASTA_PROJETO_ATUAL = pasta
     pasta_projeto_var.set(pasta)
+    PROGRAMA_PROJETO_ATUAL = pedir_programa_projeto()
 
     registrar_projeto(nome_projeto, pasta)
     atualizar_lista_projetos()
@@ -755,7 +818,7 @@ def abrir_projeto_selecionado():
     timestamps, o estado das checkboxes, o vídeo e a transcrição
     salvos da última vez (se houver), continuando de onde parou.
     """
-    global PASTA_PROJETO_ATUAL, caminho_transcricao_atual, blocos_transcricao_atual
+    global PASTA_PROJETO_ATUAL, PROGRAMA_PROJETO_ATUAL, caminho_transcricao_atual, blocos_transcricao_atual
 
     nome_selecionado = combo_projetos.get()
     if not nome_selecionado:
@@ -794,6 +857,16 @@ def abrir_projeto_selecionado():
     blocos_transcricao_atual = None
 
     estado = carregar_estado_projeto(pasta)
+
+    # Projeto antigo (criado antes dessa feature) não tem "programa"
+    # salvo ainda — pergunta uma vez agora, em vez de deixar a IA caindo
+    # pro pool genérico pra sempre nesse projeto.
+    precisa_salvar_programa = not (estado and estado.get("programa"))
+    if precisa_salvar_programa:
+        PROGRAMA_PROJETO_ATUAL = pedir_programa_projeto()
+    else:
+        PROGRAMA_PROJETO_ATUAL = estado["programa"]
+
     if estado:
         txt_entrada.delete("1.0", tk.END)
         txt_entrada.insert("1.0", estado.get("texto_timestamps", "").strip())
@@ -826,6 +899,13 @@ def abrir_projeto_selecionado():
     else:
         txt_entrada.delete("1.0", tk.END)
         txt_saida.insert(tk.END, f"Projeto '{nome_selecionado}' aberto (ainda sem progresso salvo).\n")
+
+    if precisa_salvar_programa:
+        # Persiste o programa escolhido agora — depois que tudo (texto,
+        # capítulos, vídeo) já foi restaurado em tela, senão salvar_estado_projeto()
+        # (que lê os widgets atuais) sobrescreveria o progresso recém-carregado com campos vazios.
+        salvar_estado_projeto()
+
     txt_saida.see(tk.END)
 
 
@@ -2036,10 +2116,10 @@ def obter_metadata_ia_do_capitulo(title, seg):
     tela.update_idletasks()
 
     treino = carregar_json(CAMINHO_TREINO_IA)
-    exemplos = selecionar_exemplos_few_shot(treino)
+    exemplos = selecionar_exemplos_few_shot(treino, programa=PROGRAMA_PROJETO_ATUAL)
 
     try:
-        dados_ia = avaliar_capitulo({"texto": texto}, exemplos)
+        dados_ia = avaliar_capitulo({"texto": texto, "programa": PROGRAMA_PROJETO_ATUAL}, exemplos)
     except Exception as e:
         messagebox.showerror(
             "Erro na IA",
@@ -2746,7 +2826,7 @@ def gerar_capitulos_automaticamente():
     tela.update_idletasks()
 
     treino = carregar_json(CAMINHO_TREINO_IA)
-    exemplos = selecionar_exemplos_few_shot(treino)
+    exemplos = selecionar_exemplos_few_shot(treino, programa=PROGRAMA_PROJETO_ATUAL)
 
     metadata_ia.clear()
     linhas_timestamp = []
@@ -2762,7 +2842,7 @@ def gerar_capitulos_automaticamente():
         titulo = "Sem titulo"
         if texto.strip():
             try:
-                avaliacao = avaliar_capitulo({"texto": texto}, exemplos)
+                avaliacao = avaliar_capitulo({"texto": texto, "programa": PROGRAMA_PROJETO_ATUAL}, exemplos)
             except Exception as e:
                 messagebox.showerror(
                     "Erro na IA",

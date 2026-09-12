@@ -25,20 +25,83 @@ SEED_EXEMPLOS = 42
 
 MAX_TENTATIVAS = 3
 
+# Perfil curto por programa — cada programa do Flow Games tem uma dinâmica
+# diferente de "o que vira corte", então tratar tudo como podcast genérico
+# perde sinal. RASCUNHO gerado a partir de padrões observados nos dados
+# reais de fase2_treino.json (setembro/2026, ainda com coleta parcial de
+# cortes) — vale o André revisar/ajustar o texto, ele conhece os programas
+# de verdade, isso aqui é só uma primeira leitura dos números.
+PERFIS_PROGRAMA = {
+    "FLOW GAMES NEWS": (
+        "Programa de notícias do mundo dos games: cada capítulo cobre um "
+        "anúncio, rumor, vazamento ou atualização pontual (preço, hardware, "
+        "processo judicial, elenco de adaptação, DLC). Notícia envolvendo "
+        "franquia grande (GTA, Xbox, PlayStation, Resident Evil, God of War) "
+        "ou fato de peso (processo, aumento de preço) vira corte com muita "
+        "frequência. Segmentos de abertura/encerramento ('Salve do Flow "
+        "Games', 'Encerramento') e reacts a jogos pequenos/pouco conhecidos "
+        "raramente viram corte."
+    ),
+    "EVENTOS": (
+        "Cobertura ao vivo de eventos da indústria (Gamescom, TGA, "
+        "showcases). Revelação/anúncio de jogo grande e reação a trailer de "
+        "peso costuma virar corte, mas segmento de transição genérico "
+        "('Rumores sobre o evento', 'Confirmado no evento de hoje', menção a "
+        "doação/Livepix) raramente vira — taxa de corte geral mais baixa que "
+        "Flow Games News porque tem mais cobertura de preenchimento sem "
+        "gancho forte."
+    ),
+    "flow_games": (
+        "Programa principal, com pautas mais amplas e às vezes convidado: "
+        "listas ('melhores jogos do ano'), retrospectiva/nostalgia de "
+        "trailer clássico, e quadros recorrentes com personagem fixo (ex: "
+        "'Padre Gamer') ou convidado fixo (lore de Resident Evil ft. "
+        "@Enmynest). Taxa de corte alta — a maior parte do episódio vira "
+        "corte quando tem gancho de conteúdo (quadro/personagem conhecido, "
+        "opinião forte, retrospectiva). Só housekeeping puro ('Aguarde', "
+        "'Início', 'Conclusão', plug de redes sociais) não vira."
+    ),
+    "GAMEPLAY": (
+        "Gameplay comentado ao vivo (GTA San Andreas, GTA Online, Silksong "
+        "etc.). Vira corte quando acontece um MOMENTO específico e "
+        "memorável dentro da gameplay (missão cringe, falha engraçada, "
+        "corrida caótica, chefe difícil) — não o gameplay genérico "
+        "correndo sem nada de especial. Aviso: amostra de dado ainda bem "
+        "pequena (~23 capítulos rotulados) — esse é o perfil menos "
+        "confiável dos quatro, vale revisar conforme mais dado entrar."
+    ),
+}
+
 
 def carregar_json(caminho):
     with open(caminho, "r", encoding="utf-8") as f:
         return json.load(f)
 
 
-def selecionar_exemplos_few_shot(treino, n_positivos=N_EXEMPLOS_POSITIVOS, n_negativos=N_EXEMPLOS_NEGATIVOS, seed=SEED_EXEMPLOS):
+def selecionar_exemplos_few_shot(treino, programa=None, n_positivos=N_EXEMPLOS_POSITIVOS, n_negativos=N_EXEMPLOS_NEGATIVOS, seed=SEED_EXEMPLOS):
     """
     Escolhe uma amostra fixa (mesma seed sempre) de capítulos que
     viraram corte e que não viraram, pra usar como few-shot. Fixo pra
     poder comparar resultados entre execuções sem o exemplo mudar.
+
+    Se `programa` for passado, prefere exemplos DO MESMO programa —
+    dinâmica de "o que vira corte" varia bastante entre programas (ver
+    PERFIS_PROGRAMA). Só cai pro pool genérico (todos os programas) se
+    não houver exemplos suficientes daquele programa específico pra
+    preencher n_positivos/n_negativos.
     """
-    positivos = [c for c in treino if c["virou_corte"]]
-    negativos = [c for c in treino if not c["virou_corte"]]
+    positivos_todos = [c for c in treino if c["virou_corte"]]
+    negativos_todos = [c for c in treino if not c["virou_corte"]]
+
+    def com_fallback(pool_todos, n_necessario):
+        if programa:
+            pool_programa = [c for c in pool_todos if c.get("programa") == programa]
+            if len(pool_programa) >= n_necessario:
+                return pool_programa
+        return pool_todos
+
+    positivos = com_fallback(positivos_todos, n_positivos)
+    negativos = com_fallback(negativos_todos, n_negativos)
 
     rng = random.Random(seed)
     exemplos_pos = rng.sample(positivos, min(n_positivos, len(positivos)))
@@ -49,7 +112,7 @@ def selecionar_exemplos_few_shot(treino, n_positivos=N_EXEMPLOS_POSITIVOS, n_neg
     return exemplos
 
 
-def montar_prompt(exemplos, texto_capitulo):
+def montar_prompt(exemplos, texto_capitulo, programa=None):
     blocos_exemplo = []
     for i, ex in enumerate(exemplos):
         if ex["virou_corte"]:
@@ -66,6 +129,14 @@ def montar_prompt(exemplos, texto_capitulo):
             )
 
     exemplos_texto = "\n".join(blocos_exemplo)
+
+    perfil = PERFIS_PROGRAMA.get(programa)
+    bloco_perfil = (
+        f"\nContexto sobre o programa \"{programa}\" de onde esse capítulo vem "
+        f"(use isso pra calibrar o quão típico/atípico o trecho é PRA ESSE "
+        f"programa específico, não em geral):\n{perfil}\n"
+        if perfil else ""
+    )
 
     return f"""Você é um editor de cortes do canal Flow Games. Sua tarefa é estimar
 a PROBABILIDADE de um trecho de podcast virar um corte (clipe) publicado
@@ -105,7 +176,7 @@ critério genérico de "viral", baseie-se no padrão desses exemplos.
 
 {exemplos_texto}
 --- FIM DOS EXEMPLOS ---
-
+{bloco_perfil}
 Agora avalie o capítulo abaixo. Responda SOMENTE em JSON puro (sem
 markdown, sem ```), no formato exato:
 {{
@@ -241,7 +312,7 @@ def normalizar_probabilidade(valor):
 
 def avaliar_capitulo(capitulo, exemplos, api_key=None):
     """Recebe um capítulo (dict com 'texto') e retorna a avaliação do Gemini, ou None se falhar."""
-    prompt = montar_prompt(exemplos, capitulo["texto"])
+    prompt = montar_prompt(exemplos, capitulo["texto"], programa=capitulo.get("programa"))
     resultado = chamar_gemini(prompt, api_key=api_key)
 
     if resultado is None:
@@ -268,16 +339,19 @@ def avaliar_capitulo(capitulo, exemplos, api_key=None):
 
 
 if __name__ == "__main__":
-    # Teste rápido em UM capítulo de treino, só pra ver o formato da resposta
+    # Teste rápido em UM capítulo de treino, só pra ver o formato da resposta.
+    # Escolhe o alvo PRIMEIRO agora — a seleção de exemplos depende do
+    # programa dele (prefere exemplos do mesmo programa).
     treino = carregar_json(os.path.join("dados_cortes_flow_games", "fase2_treino.json"))
-    exemplos = selecionar_exemplos_few_shot(treino)
+    alvo = treino[0]
 
-    # Pega um capítulo qualquer que NÃO esteja nos exemplos, só pra teste
-    ids_exemplos = {(e["episodio_id"], e["capitulo_inicio_segundos"]) for e in exemplos}
-    candidatos = [c for c in treino if (c["episodio_id"], c["capitulo_inicio_segundos"]) not in ids_exemplos]
-    alvo = candidatos[0]
+    pool_sem_alvo = [
+        c for c in treino
+        if (c["episodio_id"], c["capitulo_inicio_segundos"]) != (alvo["episodio_id"], alvo["capitulo_inicio_segundos"])
+    ]
+    exemplos = selecionar_exemplos_few_shot(pool_sem_alvo, programa=alvo.get("programa"))
 
-    print(f"Testando com capítulo: {alvo['capitulo_titulo']}")
+    print(f"Testando com capítulo: {alvo['capitulo_titulo']}  (programa: {alvo.get('programa')})")
     print(f"Rótulo real: {'virou corte' if alvo['virou_corte'] else 'não virou corte'}\n")
 
     resultado = avaliar_capitulo(alvo, exemplos)

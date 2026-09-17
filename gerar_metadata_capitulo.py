@@ -152,6 +152,19 @@ participam do canal. Identifique quem fala e quem é o assunto central
 SOMENTE pelo texto do trecho atual (no final deste prompt), nunca pelos
 exemplos.
 
+Sobre a quote_destaque: NÃO é um resumo neutro do assunto nem uma
+reformulação do título — isso fica genérico e repetitivo (o editor já
+vê o título logo acima). A quote_destaque é a frase mais BOMBÁSTICA que
+o host realmente disse no trecho: a opinião mais forte, a reação mais
+emocional, a crítica mais dura ou o elogio mais exagerado — o tipo de
+frase que sozinha já faz alguém querer assistir o corte. Se o título já
+afirma algo (ex: "X é golpe"), a quote não pode só repetir essa
+afirmação — ela tem que trazer a REAÇÃO/OPINIÃO por trás dela (o "por
+quê", dito com a emoção real do host), nunca a mesma ideia com outras
+palavras. Copie a frase LITERALMENTE do texto abaixo (pode cortar o
+começo/fim de uma frase maior, não precisa ser gramaticalmente completa
+sozinha) — nunca parafraseie nem invente.
+
 Sobre o texto_thumbnail: é DIFERENTE da quote_destaque. A quote_destaque
 pode ser uma frase inteira; o texto_thumbnail precisa ser bem mais
 curto — só cabe 3-5 palavras por linha, em 2 linhas, no template real
@@ -182,7 +195,7 @@ markdown, sem ```), no formato exato:
 {{
   "probabilidade_corte": número inteiro de 0 a 100 (sua estimativa de quão provável é esse capítulo virar um corte publicado, baseado no padrão dos exemplos acima),
   "titulo": "string (sempre preencha, mesmo se a probabilidade for baixa — é um rascunho pro editor avaliar)",
-  "quote_destaque": "frase curta do texto que resume o gancho",
+  "quote_destaque": "frase REAL e bombástica do host (opinião/reação forte, não repete o título)",
   "texto_thumbnail": {{
     "linha1": "3-5 palavras REAIS do texto, ditas pelo host",
     "linha2": "3-5 palavras REAIS do texto, continuando a linha1"
@@ -194,6 +207,119 @@ markdown, sem ```), no formato exato:
 Texto do capítulo a avaliar:
 {texto_capitulo[:3000]}
 """
+
+
+def montar_prompt_regen_fala_destaque(texto_capitulo, titulo_atual=None, bombastico=False):
+    """
+    Prompt enxuto (sem few-shot) pra regenerar, JUNTOS, a quote_destaque
+    E o texto_thumbnail de um capítulo específico — usado pelo botão
+    "Regenerar" no app, quando o André acha que a fala saiu genérica/sem
+    graça.
+
+    IMPORTANTE: as duas coisas têm que vir do MESMO momento/fala real do
+    host, só em tamanhos diferentes — a quote_destaque é a frase
+    completa, o texto_thumbnail é a versão resumida (3-5 palavras por
+    linha) que vai literalmente escrita na imagem da thumbnail. Se
+    vierem de momentos diferentes do trecho, ficam sem sincronia (a
+    thumb promete uma coisa, a quote de destaque fala de outra). Por
+    isso pedimos os dois numa mesma chamada, escolhendo primeiro O
+    momento, e derivando as duas versões dele.
+
+    Não reusa montar_prompt() porque aqui a gente já TEM o texto e o
+    título; não precisa reavaliar probabilidade nem recalibrar com
+    exemplos de novo.
+    """
+    instrucao_tom = (
+        "Modo MAIS BOMBÁSTICO: procure o momento mais duro, polêmico ou "
+        "emocionalmente carregado que o host viveu no trecho abaixo — o "
+        "que geraria mais reação/clique, mesmo que seja uma crítica bem "
+        "pesada, um elogio bem exagerado, ou uma virada de opinião no "
+        "meio da fala."
+        if bombastico else
+        "Procure o momento que carrega a OPINIÃO ou REAÇÃO mais forte do "
+        "host no trecho abaixo — o momento mais marcante da fala, não um "
+        "resumo neutro do assunto."
+    )
+    bloco_titulo = (
+        f"\nO título já escolhido pra esse corte é: \"{titulo_atual}\" — "
+        f"nem a quote_destaque nem o texto_thumbnail podem ser uma "
+        f"reformulação/paráfrase desse título. Se o título já afirma "
+        f"algo, os dois precisam trazer informação NOVA (a opinião, o "
+        f"motivo, ou a reação por trás), nunca repetir a mesma ideia com "
+        f"outras palavras.\n"
+        if titulo_atual else ""
+    )
+
+    return f"""Você é um editor de cortes do canal Flow Games, escolhendo a
+melhor "fala de destaque" do corte abaixo — o momento que, sozinho, já
+faz alguém querer assistir, e que também vai virar o texto escrito na
+imagem da thumbnail.
+
+{instrucao_tom}
+{bloco_titulo}
+Primeiro escolha ESSE momento único no trecho. Depois derive dele DUAS
+versões:
+- quote_destaque: a frase completa desse momento (pode ser uma frase
+  inteira).
+- texto_thumbnail: uma versão bem mais curta do MESMO momento — só cabe
+  3-5 palavras por linha, em 2 linhas, no template real do canal.
+
+As duas têm que soar como o MESMO momento contado em tamanhos
+diferentes, nunca dois trechos diferentes do texto. Copie as palavras
+LITERALMENTE do texto abaixo (pode cortar o começo/fim de uma frase
+maior, não precisa ser gramaticalmente completo sozinho) — NUNCA
+parafraseie, resuma por fora, ou invente palavras que o host não disse.
+
+Responda SOMENTE em JSON puro (sem markdown, sem ```), no formato exato:
+{{
+  "quote_destaque": "frase real, copiada do texto abaixo",
+  "texto_thumbnail": {{
+    "linha1": "3-5 palavras REAIS do texto, do MESMO momento da quote_destaque",
+    "linha2": "3-5 palavras REAIS do texto, continuando a linha1"
+  }}
+}}
+
+Texto do trecho:
+{texto_capitulo[:3000]}
+"""
+
+
+def regenerar_fala_destaque(capitulo, titulo_atual=None, bombastico=False, api_key=None):
+    """
+    Gera uma NOVA quote_destaque + texto_thumbnail JUNTOS pro mesmo
+    capítulo, sem refazer probabilidade/título/descrição — usado quando
+    a fala original saiu genérica. `bombastico=True` pede uma opção mais
+    forte/polêmica ainda. Retorna None se falhar, ou um dict com a mesma
+    validação de sempre (quote_encontrada_exata / quote_fracao_sequencial
+    e o equivalente pro texto_thumbnail) pra continuar filtrando fala
+    inventada.
+    """
+    prompt = montar_prompt_regen_fala_destaque(capitulo["texto"], titulo_atual=titulo_atual, bombastico=bombastico)
+    resultado = chamar_gemini(prompt, api_key=api_key)
+
+    if not resultado or not resultado.get("quote_destaque"):
+        return None
+
+    texto_thumb = resultado.get("texto_thumbnail")
+    if not isinstance(texto_thumb, dict) or not (texto_thumb.get("linha1") or texto_thumb.get("linha2")):
+        return None
+
+    quote = resultado["quote_destaque"]
+    exata, fracao = verificar_quote(quote, capitulo["texto"])
+
+    texto_completo_thumb = f"{texto_thumb.get('linha1', '')} {texto_thumb.get('linha2', '')}".strip()
+    exata_thumb, fracao_thumb = verificar_quote(texto_completo_thumb, capitulo["texto"])
+
+    return {
+        "quote_destaque": quote,
+        "quote_encontrada_exata": exata,
+        "quote_fracao_sequencial": round(fracao, 2),
+        "texto_thumbnail": {
+            "linha1": texto_thumb.get("linha1", ""),
+            "linha2": texto_thumb.get("linha2", ""),
+        },
+        "texto_thumbnail_fracao_sequencial": round(fracao_thumb, 2),
+    }
 
 
 def chamar_gemini(prompt, api_key=None, model_name=MODEL_NAME, max_tentativas=MAX_TENTATIVAS):

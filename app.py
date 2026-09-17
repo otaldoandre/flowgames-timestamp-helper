@@ -12,6 +12,7 @@ import shutil
 import sys
 import threading
 import time
+import concurrent.futures
 
 
 def obter_pasta_base():
@@ -82,7 +83,7 @@ if not _email_autenticado:
 
 print("[DIAGNOSTICO 6/8] Login passou — importando módulos pesados (rembg, IA, Photoshop)...", flush=True)
 from detectar_capitulos import detectar_capitulos, carregar_transcricao as carregar_transcricao_ia
-from gerar_metadata_capitulo import carregar_json, selecionar_exemplos_few_shot, avaliar_capitulo
+from gerar_metadata_capitulo import carregar_json, selecionar_exemplos_few_shot, avaliar_capitulo, regenerar_fala_destaque
 from pipeline_thumbnail import montar_thumbnail_completa
 from PIL import Image, ImageTk
 print("[DIAGNOSTICO 7/8] Módulos pesados importados com sucesso", flush=True)
@@ -104,6 +105,55 @@ PASTA_SAIDA_THUMBNAILS = os.environ.get("PASTA_SAIDA_THUMBNAILS", "")
 # em requisições sem login. Só é usado se essa variável estiver
 # preenchida E o arquivo existir — sem ela, comportamento de sempre.
 CAMINHO_COOKIES_YOUTUBE = os.environ.get("COOKIES_YOUTUBE_PATH", "")
+
+
+def _carregar_parallel_workers():
+    """
+    Lê "parallel_workers" de config.json (na pasta base do app) — quantos
+    cortes _gerar_cortes_worker processa ao mesmo tempo. Esse campo já
+    existia no config.json mas nunca tinha sido lido em lugar nenhum do
+    app até agora. Limitado entre 1 e 4: mais que isso não ajuda muito e
+    esbarra no limite de sessões simultâneas de NVENC de GPUs GeForce
+    (tipicamente ~2-3). Se o arquivo não existir ou o campo faltar, usa 2
+    como padrão seguro.
+    """
+    caminho = os.path.join(PASTA_BASE, "config.json")
+    try:
+        with open(caminho, "r", encoding="utf-8") as f:
+            valor = json.load(f).get("parallel_workers", 2)
+        return max(1, min(int(valor), 4))
+    except Exception:
+        return 2
+
+
+PARALLEL_WORKERS = _carregar_parallel_workers()
+
+# Mesmo proxy residencial (Webshare) já usado nos scripts de coleta em
+# massa (scripts/coletar_dados_*.py) pra contornar bloqueio de IP do
+# YouTube — reaproveita as MESMAS credenciais do .env aqui no app, como
+# plano B se a requisição direta (sem proxy) falhar por bloqueio.
+# Opcional: sem essas variáveis no .env, o app segue só com a requisição
+# direta, do jeito que já era.
+WEBSHARE_PROXY_USERNAME = os.environ.get("WEBSHARE_PROXY_USERNAME")
+WEBSHARE_PROXY_PASSWORD = os.environ.get("WEBSHARE_PROXY_PASSWORD")
+
+
+def _proxy_url_ytdlp():
+    """
+    Monta a URL de proxy no formato "http://usuario:senha@host:porta"
+    que o yt-dlp espera (--proxy), reaproveitando as credenciais do
+    Webshare. Usa o mesmo sufixo "-rotate" que o youtube_transcript_api
+    aplica por baixo dos panos (ver scripts/testar_rotacao_webshare.py)
+    pra garantir IP rotativo. None se não tiver credenciais configuradas.
+    """
+    if not (WEBSHARE_PROXY_USERNAME and WEBSHARE_PROXY_PASSWORD):
+        return None
+    usuario_base = (
+        WEBSHARE_PROXY_USERNAME[: -len("-rotate")]
+        if WEBSHARE_PROXY_USERNAME.endswith("-rotate")
+        else WEBSHARE_PROXY_USERNAME
+    )
+    return f"http://{usuario_base}-rotate:{WEBSHARE_PROXY_PASSWORD}@p.webshare.io:80/"
 
 _caminhos_obrigatorios = {
     "CAMINHO_TREINO_IA": CAMINHO_TREINO_IA,
@@ -173,15 +223,22 @@ def _finalizar_operacao_longa():
 # Estado do cancelamento — compartilhado entre geração de cortes e de
 # previews, já que só uma operação roda por vez (ver _operacao_longa_ativa)
 _cancelar_geracao = {"solicitado": False}
-_processo_ffmpeg_atual = {"proc": None}
+
+# Processos ffmpeg em execução AGORA — pode ter mais de um ao mesmo tempo
+# desde que _gerar_cortes_worker passou a processar vários cortes em
+# paralelo (ver PARALLEL_WORKERS), então isso virou um conjunto (era um
+# único slot antes, quando só existia um corte por vez). O lock protege
+# contra duas threads mexendo nesse conjunto ao mesmo tempo.
+_processos_ffmpeg_ativos = set()
+_lock_processos_ffmpeg = threading.Lock()
 
 
 def cancelar_geracao():
     """
     Chamado pelo botão "Cancelar" — pede confirmação primeiro, depois
-    mata o processo ffmpeg em execução NA HORA (não espera ele
-    terminar sozinho), e marca pra parar antes de começar o próximo
-    corte/preview da lista.
+    mata TODOS os processos ffmpeg em execução NA HORA (podem ser vários
+    ao mesmo tempo, com o processamento em paralelo — não espera nenhum
+    terminar sozinho), e marca pra não iniciar mais nenhum corte novo.
     """
     if not messagebox.askyesno(
         "Cancelar geração",
@@ -193,21 +250,24 @@ def cancelar_geracao():
 
     _cancelar_geracao["solicitado"] = True
 
-    proc = _processo_ffmpeg_atual["proc"]
-    if proc and proc.poll() is None:  # ainda rodando
-        try:
-            proc.terminate()
-            if os.name == "nt":
-                # No Windows, terminate() sozinho às vezes não mata os
-                # processos filhos que o shell=True criou (o comando
-                # atual pode ter "&&" encadeando várias chamadas de
-                # ffmpeg) — taskkill com /T garante a árvore inteira
-                subprocess.run(
-                    ["taskkill", "/F", "/T", "/PID", str(proc.pid)],
-                    capture_output=True
-                )
-        except Exception:
-            pass
+    with _lock_processos_ffmpeg:
+        processos = list(_processos_ffmpeg_ativos)
+
+    for proc in processos:
+        if proc.poll() is None:  # ainda rodando
+            try:
+                proc.terminate()
+                if os.name == "nt":
+                    # No Windows, terminate() sozinho às vezes não mata os
+                    # processos filhos que o shell=True criou (o comando
+                    # atual pode ter "&&" encadeando várias chamadas de
+                    # ffmpeg) — taskkill com /T garante a árvore inteira
+                    subprocess.run(
+                        ["taskkill", "/F", "/T", "/PID", str(proc.pid)],
+                        capture_output=True
+                    )
+            except Exception:
+                pass
 
     txt_saida.insert(tk.END, "Cancelamento solicitado — parando após o passo atual...\n")
     txt_saida.see(tk.END)
@@ -221,11 +281,20 @@ def executar_comando_cancelavel(cmd):
     cancelar_geracao() consegue matar de verdade no meio da execução,
     e devolve o código de saída de verdade (os.system() não checava
     isso, então uma falha do ffmpeg aparecia como "Completo" na tela).
+
+    Chamada de várias threads ao mesmo tempo quando o processamento é
+    paralelo (ver PARALLEL_WORKERS) — por isso registra/remove esse
+    processo específico de _processos_ffmpeg_ativos em vez de guardar
+    num único slot (que só suportava um processo por vez).
     """
     processo = subprocess.Popen(cmd, shell=True)
-    _processo_ffmpeg_atual["proc"] = processo
-    processo.wait()
-    _processo_ffmpeg_atual["proc"] = None
+    with _lock_processos_ffmpeg:
+        _processos_ffmpeg_ativos.add(processo)
+    try:
+        processo.wait()
+    finally:
+        with _lock_processos_ffmpeg:
+            _processos_ffmpeg_ativos.discard(processo)
     return processo.returncode
 
 
@@ -690,43 +759,75 @@ def download_youtube_video(url, output_dir):
 
     log("Baixando vídeo do YouTube, aguarde...\n")
 
-    args_cookies = []
-    if CAMINHO_COOKIES_YOUTUBE and os.path.exists(CAMINHO_COOKIES_YOUTUBE):
-        args_cookies = [
-            "--cookies", CAMINHO_COOKIES_YOUTUBE,
-            # Contorno documentado pra um bug ativo do yt-dlp (issue #17389,
-            # ainda aberta): usar cookies puxa um client interno do YouTube
-            # ("tv_downgraded") que anda quebrado com o novo streaming SABR
-            # que o YouTube forçou — força outros clients pra evitar isso.
-            "--extractor-args", "youtube:player_client=tv,default",
-        ]
-
-    formato_usado = None
-    erro_ultima_tentativa = "Erro desconhecido"
+    cookies_disponiveis = bool(CAMINHO_COOKIES_YOUTUBE and os.path.exists(CAMINHO_COOKIES_YOUTUBE))
+    args_cookies_extra = [
+        "--cookies", CAMINHO_COOKIES_YOUTUBE,
+        # Contorno documentado pra um bug ativo do yt-dlp (issue #17389,
+        # ainda aberta): usar cookies puxa um client interno do YouTube
+        # ("tv_downgraded") que anda quebrado com o novo streaming SABR
+        # que o YouTube forçou — força outros clients pra evitar isso.
+        "--extractor-args", "youtube:player_client=tv,default",
+    ] if cookies_disponiveis else []
 
     formatos_tentativa = [
         "bv*[height<=1080][vcodec^=avc1][ext=mp4]+ba[ext=m4a]/b[height<=1080][vcodec^=avc1][ext=mp4]",
         "bv*[height<=1080][ext=mp4]+ba[ext=m4a]/b[height<=1080][ext=mp4]",
     ]
-    for i, formato in enumerate(formatos_tentativa):
-        cmd = [
-            "yt-dlp",
-            *args_cookies,
-            "-f", formato,
-            "--merge-output-format", "mp4",
-            "--no-playlist",
-            "-o", output_template,
-            url,
-        ]
-        result = subprocess.run(cmd, capture_output=True, text=True)
 
-        if result.returncode == 0:
-            formato_usado = formato
-            break
+    def _tentar_formatos(args_extra):
+        """Tenta cada formato com os args dados. Retorna (formato_usado, erro)."""
+        erro_local = "Erro desconhecido"
+        for i, formato in enumerate(formatos_tentativa):
+            cmd = [
+                "yt-dlp",
+                *args_extra,
+                "-f", formato,
+                "--merge-output-format", "mp4",
+                "--no-playlist",
+                "-o", output_template,
+                url,
+            ]
+            result = subprocess.run(cmd, capture_output=True, text=True)
 
-        erro_ultima_tentativa = result.stderr.strip().splitlines()[-1] if result.stderr.strip() else "Erro desconhecido"
-        if i < len(formatos_tentativa) - 1:
-            log(f"Formato preferido falhou ({erro_ultima_tentativa}), tentando alternativo...\n")
+            if result.returncode == 0:
+                return formato, None
+
+            erro_local = result.stderr.strip().splitlines()[-1] if result.stderr.strip() else "Erro desconhecido"
+            if i < len(formatos_tentativa) - 1:
+                log(f"Formato preferido falhou ({erro_local}), tentando alternativo...\n")
+        return None, erro_local
+
+    # Tenta primeiro SEM cookies — cookies só fazem falta pra vídeo com
+    # restrição de idade ou live privada, e o contorno acima pro bug do
+    # yt-dlp nem sempre resolve; usar cookies à toa vem causando o
+    # próprio YouTube devolver uma página de erro ("try reloading") pra
+    # download que funcionaria normal sem eles. Só usa cookies como
+    # plano B, se o download sem eles falhar.
+    args_vencedores = []
+    formato_usado, erro_ultima_tentativa = _tentar_formatos(args_vencedores)
+    if formato_usado is None and cookies_disponiveis:
+        log(f"Download sem cookies falhou ({erro_ultima_tentativa}), tentando com cookies...\n")
+        formato_usado, erro_tentativa = _tentar_formatos(args_cookies_extra)
+        if formato_usado is not None:
+            args_vencedores = args_cookies_extra
+        else:
+            erro_ultima_tentativa = erro_tentativa
+
+    # Se mesmo assim falhou, pode ser bloqueio de IP (não cookies) — tenta
+    # de novo pelo proxy Webshare (mesmas credenciais dos scripts de coleta
+    # de dados), com e sem cookies.
+    proxy_url = _proxy_url_ytdlp()
+    if formato_usado is None and proxy_url:
+        log(f"Download direto falhou ({erro_ultima_tentativa}), tentando via proxy Webshare...\n")
+        formato_usado, erro_tentativa = _tentar_formatos(["--proxy", proxy_url])
+        if formato_usado is not None:
+            args_vencedores = ["--proxy", proxy_url]
+        elif cookies_disponiveis:
+            formato_usado, erro_tentativa = _tentar_formatos(["--proxy", proxy_url] + args_cookies_extra)
+            if formato_usado is not None:
+                args_vencedores = ["--proxy", proxy_url] + args_cookies_extra
+        if formato_usado is None:
+            erro_ultima_tentativa = erro_tentativa
 
     if formato_usado is None:
         tela.after(0, lambda: messagebox.showerror("Erro", f"Falha ao baixar o vídeo do YouTube:\n{erro_ultima_tentativa}"))
@@ -736,7 +837,7 @@ def download_youtube_video(url, output_dir):
     # (usa o MESMO formato que funcionou, senão o nome pode não bater)
     filename_cmd = [
         "yt-dlp",
-        *args_cookies,
+        *args_vencedores,
         "--get-filename",
         "-f", formato_usado,
         "--merge-output-format", "mp4",
@@ -1066,7 +1167,12 @@ def resolver_video():
             try:
                 filepath = download_youtube_video(youtube_url, download_dir)
             except Exception as e:
-                tela.after(0, lambda: messagebox.showerror("Erro", f"Falha ao baixar o vídeo:\n{e}"))
+                # Guarda como string antes do "except" acabar — o Python
+                # apaga a variável "e" sozinho ao sair do bloco, e a lambda
+                # abaixo só roda depois (via tela.after), quando ela já não
+                # existiria mais (mesmo bug corrigido em baixar_transcricao_youtube).
+                erro_str = str(e)
+                tela.after(0, lambda: messagebox.showerror("Erro", f"Falha ao baixar o vídeo:\n{erro_str}"))
                 filepath = None
 
             def _concluir():
@@ -1167,34 +1273,54 @@ def baixar_transcricao_via_ytdlp_legenda(video_id, url, pasta_destino):
 
     Baixa só a legenda (--skip-download, não baixa o vídeo) e devolve
     o caminho do .vtt baixado. Levanta exceção se não conseguir.
+
+    Tenta primeiro SEM cookies (mesmo motivo de download_youtube_video:
+    usar cookies à toa vem quebrando downloads que funcionariam normal,
+    com o YouTube devolvendo uma página de erro "try reloading") e só
+    usa cookies como plano B, pro caso de vídeo com restrição de idade
+    onde eles realmente fazem falta. Se mesmo assim continuar falhando
+    (ex: "HTTP 429 Too Many Requests", sinal de bloqueio de IP), tenta
+    de novo pelo proxy Webshare (mesmas credenciais dos scripts de
+    coleta de dados), com e sem cookies.
     """
-    args_cookies = []
-    if CAMINHO_COOKIES_YOUTUBE and os.path.exists(CAMINHO_COOKIES_YOUTUBE):
-        args_cookies = [
-            "--cookies", CAMINHO_COOKIES_YOUTUBE,
-            # Mesmo contorno de download_youtube_video() — bug ativo do
-            # yt-dlp (issue #17389) entre cookies e o client "tv_downgraded"
-            "--extractor-args", "youtube:player_client=tv,default",
-        ]
+    cookies_disponiveis = bool(CAMINHO_COOKIES_YOUTUBE and os.path.exists(CAMINHO_COOKIES_YOUTUBE))
+    args_cookies_extra = [
+        "--cookies", CAMINHO_COOKIES_YOUTUBE,
+        # Mesmo contorno de download_youtube_video() — bug ativo do
+        # yt-dlp (issue #17389) entre cookies e o client "tv_downgraded"
+        "--extractor-args", "youtube:player_client=tv,default",
+    ] if cookies_disponiveis else []
 
     nome_base = os.path.join(pasta_destino, f"legenda_{video_id}")
 
-    cmd = [
-        "yt-dlp",
-        *args_cookies,
-        "--write-auto-sub",
-        "--sub-lang", "pt.*,pt",
-        "--skip-download",
-        "--sub-format", "vtt",
-        "-o", nome_base,
-        url,
-    ]
-    resultado = subprocess.run(cmd, capture_output=True, text=True)
+    def _tentar(args_extra):
+        cmd = [
+            "yt-dlp",
+            *args_extra,
+            "--write-auto-sub",
+            "--sub-lang", "pt.*,pt",
+            "--skip-download",
+            "--sub-format", "vtt",
+            "-o", nome_base,
+            url,
+        ]
+        resultado_local = subprocess.run(cmd, capture_output=True, text=True)
+        candidatos_local = [
+            f for f in os.listdir(pasta_destino)
+            if f.startswith(f"legenda_{video_id}") and f.endswith(".vtt")
+        ]
+        return candidatos_local, resultado_local
 
-    candidatos = [
-        f for f in os.listdir(pasta_destino)
-        if f.startswith(f"legenda_{video_id}") and f.endswith(".vtt")
-    ]
+    candidatos, resultado = _tentar([])
+    if not candidatos and cookies_disponiveis:
+        candidatos, resultado = _tentar(args_cookies_extra)
+
+    proxy_url = _proxy_url_ytdlp()
+    if not candidatos and proxy_url:
+        candidatos, resultado = _tentar(["--proxy", proxy_url])
+        if not candidatos and cookies_disponiveis:
+            candidatos, resultado = _tentar(["--proxy", proxy_url] + args_cookies_extra)
+
     if not candidatos:
         erro = resultado.stderr.strip().splitlines()[-1] if resultado.stderr.strip() else "arquivo de legenda não encontrado"
         raise RuntimeError(erro)
@@ -1250,16 +1376,45 @@ def baixar_transcricao_youtube():
     def _worker():
         pasta_destino = PASTA_PROJETO_ATUAL or PASTA_BASE
 
+        transcricao = None
+        erro_metodo_normal = None
+
         try:
             api = YouTubeTranscriptApi()
             transcricao = api.fetch(video_id, languages=["pt"])
         except Exception as e:
-            # Tenta o plano B (yt-dlp) antes de desistir — cobre principalmente
-            # vídeo com restrição de idade, que a youtube_transcript_api não
-            # consegue baixar de jeito nenhum agora (ver docstring de
-            # baixar_transcricao_via_ytdlp_legenda)
-            log(f"[AVISO] Método normal falhou ({e}) — tentando via yt-dlp...\n")
+            # IMPORTANTE: converte pra string já aqui, fora do "except" —
+            # o Python apaga a variável "e" sozinho assim que o bloco
+            # "except" termina, e as funções abaixo só são chamadas depois
+            # (via tela.after, de forma assíncrona) — nesse momento "e" já
+            # não existiria mais (dava "NameError: cannot access free
+            # variable 'e'").
+            erro_metodo_normal = str(e)
+            log(f"[AVISO] Método normal falhou ({erro_metodo_normal})")
 
+            # Antes de partir pro yt-dlp, tenta de novo a MESMA API mas via
+            # proxy Webshare (mesmas credenciais dos scripts de coleta de
+            # dados) — cobre o caso comum de bloqueio de IP (erro cita
+            # "YouTube is blocking requests from your IP"), que não tem
+            # nada a ver com o vídeo em si e afeta qualquer transcrição.
+            if WEBSHARE_PROXY_USERNAME and WEBSHARE_PROXY_PASSWORD:
+                log(" — tentando de novo via proxy Webshare...\n")
+                try:
+                    from youtube_transcript_api.proxies import WebshareProxyConfig
+                    api_proxy = YouTubeTranscriptApi(proxy_config=WebshareProxyConfig(
+                        proxy_username=WEBSHARE_PROXY_USERNAME,
+                        proxy_password=WEBSHARE_PROXY_PASSWORD,
+                    ))
+                    transcricao = api_proxy.fetch(video_id, languages=["pt"])
+                    erro_metodo_normal = None  # deu certo no fim, via proxy
+                except Exception as e_proxy:
+                    erro_metodo_normal = f"{erro_metodo_normal} | (via proxy Webshare) {e_proxy}"
+            else:
+                log(" — tentando via yt-dlp...\n")
+
+        if transcricao is None:
+            if erro_metodo_normal and WEBSHARE_PROXY_USERNAME and WEBSHARE_PROXY_PASSWORD:
+                log("[AVISO] Também falhou via proxy Webshare — tentando via yt-dlp...\n")
             try:
                 caminho_vtt = baixar_transcricao_via_ytdlp_legenda(video_id, url, pasta_destino)
                 texto_convertido = _converter_vtt_para_blocos(caminho_vtt)
@@ -1289,19 +1444,22 @@ def baixar_transcricao_youtube():
 
                 tela.after(0, _concluir_via_ytdlp)
             except Exception as e2:
+                erro_ytdlp = str(e2)  # mesmo motivo do comentário acima, pro "e2"
+
                 def _falhou():
-                    txt_saida.insert(tk.END, f"[ERRO] Falha nos dois métodos: {e} | {e2}\n")
+                    txt_saida.insert(tk.END, f"[ERRO] Falha em todos os métodos: {erro_metodo_normal} | {erro_ytdlp}\n")
                     txt_saida.see(tk.END)
                     btn_baixar_transcricao.config(state="normal")
                     messagebox.showwarning(
                         "Transcrição indisponível",
-                        "Não consegui baixar a transcrição desse vídeo agora, nem pelo método "
-                        "normal nem pelo alternativo (yt-dlp).\n\n"
+                        "Não consegui baixar a transcrição desse vídeo agora, nem pela API "
+                        "normal (direto ou via proxy) nem pelo yt-dlp.\n\n"
                         "Isso é comum logo depois de uma live grande terminar (legenda ainda não "
-                        "gerada), ou em vídeo com restrição de idade sem cookies de uma conta com "
-                        "acesso configurados.\n\n"
-                        f"Detalhe técnico (método normal): {e}\n\n"
-                        f"Detalhe técnico (yt-dlp): {e2}"
+                        "gerada), em vídeo com restrição de idade sem cookies de uma conta com "
+                        "acesso, ou quando o YouTube está bloqueando bastante as requisições no "
+                        "momento.\n\n"
+                        f"Detalhe técnico (API): {erro_metodo_normal}\n\n"
+                        f"Detalhe técnico (yt-dlp): {erro_ytdlp}"
                     )
                 tela.after(0, _falhou)
             return
@@ -1424,15 +1582,18 @@ def _parece_transcricao_youtube_colada(texto):
     Detecta se o texto está no formato bagunçado que sai ao copiar
     direto do painel "Mostrar transcrição" do YouTube — timestamp curto
     (ex: "7:29") seguido, sem separador nenhum, do mesmo tempo escrito
-    por extenso pra acessibilidade (ex: "7 minutes, 29 seconds"), e só
-    depois o texto de verdade. Diferente do formato [MM:SS] que o
-    programa usa normalmente.
+    por extenso pra acessibilidade (ex: "7 minutes, 29 seconds" em
+    inglês, ou "7 minutos e 29 segundos" em português — depende do
+    idioma configurado na conta/navegador), e só depois o texto de
+    verdade. Diferente do formato [MM:SS] que o programa usa
+    normalmente.
     """
     if re.match(r"^\[\d{1,4}:\d{2}\]", texto.strip()):
         return False  # já está no formato certo, não precisa converter
 
     padrao_prefixo = re.compile(
-        r"(?:\d{1,2}:)?\d{1,2}:\d{2}(?:\d+\s*(?:hours?|minutes?|seconds?),?\s*)+"
+        r"(?:\d{1,2}:)?\d{1,2}:\d{2}"
+        r"(?:\d+\s*(?:hours?|minutes?|seconds?|horas?|minutos?|segundos?)(?:,|\s+e\b)?\s*)+"
     )
     # Pelo menos 2 ocorrências — evita falso positivo em texto solto
     # que por acaso mencione algo tipo "5 minutes" no meio da fala
@@ -1443,11 +1604,12 @@ def _converter_transcricao_youtube_colada(texto_colado):
     """
     Converte o texto colado do painel de transcrição do YouTube pro
     formato [MM:SS] texto que o resto do pipeline (carregar_transcricao_ia)
-    já espera.
+    já espera. Reconhece o rótulo por extenso tanto em inglês quanto em
+    português (idioma da conta do YouTube usada pra copiar).
     """
     padrao_prefixo = re.compile(
         r"((?:\d{1,2}:)?\d{1,2}:\d{2})"
-        r"(?:\d+\s*(?:hours?|minutes?|seconds?),?\s*)+"
+        r"(?:\d+\s*(?:hours?|minutes?|seconds?|horas?|minutos?|segundos?)(?:,|\s+e\b)?\s*)+"
     )
 
     matches = list(padrao_prefixo.finditer(texto_colado))
@@ -1475,6 +1637,47 @@ def _converter_transcricao_youtube_colada(texto_colado):
     return "\n".join(linhas_saida)
 
 
+def _detectar_e_converter_transcricao_colada(caminho):
+    """
+    Lê o arquivo em `caminho` e, se estiver no formato bagunçado que
+    sai ao colar a transcrição copiada direto do painel do YouTube
+    (timestamp curto + rótulo por extenso grudados, em português ou
+    inglês), converte pro formato [MM:SS] texto e regrava o arquivo no
+    lugar. Não faz nada se já estiver no formato certo.
+
+    Compartilhada entre selecionar_transcricao_manual() e
+    gerar_capitulos_automaticamente() — esse último tem seu próprio
+    seletor de arquivo e não passava por essa conversão antes, então
+    selecionar ali uma transcrição colada direto dava "nenhum capítulo
+    detectado" sem nenhuma pista do motivo.
+
+    Retorna (status, detalhe) onde status é "convertida",
+    "sem_conversao", "erro_leitura" ou "erro_salvar" — os dois últimos
+    vêm com uma mensagem pronta pra mostrar ao usuário em `detalhe`
+    (None nos outros casos).
+    """
+    try:
+        with open(caminho, "r", encoding="utf-8") as f:
+            conteudo = f.read()
+    except OSError as e:
+        return "erro_leitura", f"Não consegui ler o arquivo:\n{e}"
+
+    if not _parece_transcricao_youtube_colada(conteudo):
+        return "sem_conversao", None
+
+    conteudo_convertido = _converter_transcricao_youtube_colada(conteudo)
+    if not conteudo_convertido.strip():
+        return "sem_conversao", None
+
+    try:
+        with open(caminho, "w", encoding="utf-8") as f:
+            f.write(conteudo_convertido)
+    except OSError as e:
+        return "erro_salvar", f"Detectei o formato do YouTube, mas não consegui salvar convertido:\n{e}"
+
+    return "convertida", None
+
+
 def selecionar_transcricao_manual():
     """
     Seleciona a transcrição do episódio explicitamente (em vez de só
@@ -1485,8 +1688,9 @@ def selecionar_transcricao_manual():
 
     Se o arquivo escolhido estiver no formato bagunçado que sai ao
     colar a transcrição copiada direto do YouTube (timestamp curto +
-    rótulo por extenso grudados), converte automaticamente pro formato
-    [MM:SS] antes de carregar — não precisa fazer isso na mão.
+    rótulo por extenso grudados, em português ou inglês), converte
+    automaticamente pro formato [MM:SS] antes de carregar — não
+    precisa fazer isso na mão.
     """
     global caminho_transcricao_atual, blocos_transcricao_atual
 
@@ -1497,29 +1701,18 @@ def selecionar_transcricao_manual():
     if not caminho:
         return
 
-    try:
-        with open(caminho, "r", encoding="utf-8") as f:
-            conteudo = f.read()
-    except OSError as e:
-        messagebox.showerror("Erro", f"Não consegui ler o arquivo:\n{e}")
+    status, detalhe = _detectar_e_converter_transcricao_colada(caminho)
+    if status == "erro_leitura":
+        messagebox.showerror("Erro", detalhe)
         return
-
-    if _parece_transcricao_youtube_colada(conteudo):
-        conteudo_convertido = _converter_transcricao_youtube_colada(conteudo)
-        if conteudo_convertido.strip():
-            try:
-                with open(caminho, "w", encoding="utf-8") as f:
-                    f.write(conteudo_convertido)
-                txt_saida.insert(
-                    tk.END,
-                    "Detectei transcrição colada do YouTube — convertida pro formato certo automaticamente.\n"
-                )
-                txt_saida.see(tk.END)
-            except OSError as e:
-                messagebox.showwarning(
-                    "Aviso",
-                    f"Detectei o formato do YouTube, mas não consegui salvar convertido:\n{e}"
-                )
+    if status == "erro_salvar":
+        messagebox.showwarning("Aviso", detalhe)
+    elif status == "convertida":
+        txt_saida.insert(
+            tk.END,
+            "Detectei transcrição colada do YouTube — convertida pro formato certo automaticamente.\n"
+        )
+        txt_saida.see(tk.END)
 
     caminho_transcricao_atual = caminho
     blocos_transcricao_atual = carregar_transcricao_ia(caminho)
@@ -1629,6 +1822,13 @@ def _gerar_cortes_worker(path, segments, enable_fade_in, enable_fade_out, enable
     aqui dentro (não é thread-safe) — atualizações de tela são
     agendadas via tela.after(0, ...) pra rodar de volta na thread
     principal.
+
+    Processa até PARALLEL_WORKERS cortes ao mesmo tempo (config.json,
+    "parallel_workers") num ThreadPoolExecutor — antes disso era um
+    corte de cada vez (aguardava terminar pra só então começar o
+    próximo), o que deixava o i9 (decode/filtro) e a GPU (sessões
+    NVENC) ociosos boa parte do tempo. cancelar_geracao() já sabe matar
+    vários processos ffmpeg em paralelo (ver _processos_ffmpeg_ativos).
     """
     fade_duration = 1.4
 
@@ -1636,29 +1836,35 @@ def _gerar_cortes_worker(path, segments, enable_fade_in, enable_fade_out, enable
     pasta_original = os.getcwd()
     os.chdir(pasta_destino)
 
-    ## Processamento dos segmentos ##
-    resultados = []
     total_segments = len(segments)
-    for i, seg in enumerate(segments):
+    lock_contadores = threading.Lock()
+    contadores = {"concluidos": 0, "em_andamento": 0}
+
+    def _atualizar_progresso_geral():
+        # Chamado sempre com lock_contadores já seguro (dentro do "with").
+        c, a = contadores["concluidos"], contadores["em_andamento"]
+        percent = (c / total_segments) * 100 if total_segments else 0
+        tela.after(0, lambda c=c, a=a: atualizar_janela_progresso(widgets_progresso, concluidos=c, em_andamento=a))
+        tela.after(0, lambda p=percent: progress.config(value=p))
+
+    def _processar_um(i, seg):
         start = seg["start"]
         end = seg["end"]
         title = seg["title"]
 
         if _cancelar_geracao["solicitado"]:
-            resultados.append({"title": title, "status": "cancelado", "arquivos": []})
-            continue
+            return {"title": title, "status": "cancelado", "arquivos": []}
 
         caminho_saida_esperado = os.path.join(pasta_destino, f"{title}.mp4")
         if pular_existentes and os.path.exists(caminho_saida_esperado):
-            resultados.append({"title": title, "status": "pulado", "arquivos": [caminho_saida_esperado]})
-            tela.after(0, lambda i=i: atualizar_janela_progresso(widgets_progresso, concluidos=i + 1, em_andamento=0))
-            continue
+            with lock_contadores:
+                contadores["concluidos"] += 1
+                _atualizar_progresso_geral()
+            return {"title": title, "status": "pulado", "arquivos": [caminho_saida_esperado]}
 
-        # Barra de progresso
-        percent_progress = ((i + 1) / total_segments) * 100
-        tela.after(0, lambda p=percent_progress: progress.config(value=p))
-        tela.after(0, lambda i=i: atualizar_janela_progresso(widgets_progresso, concluidos=i, em_andamento=1))
-
+        with lock_contadores:
+            contadores["em_andamento"] += 1
+            _atualizar_progresso_geral()
 
         ## Calculo de duração dos segmentos
         total_seconds = None
@@ -1864,16 +2070,43 @@ def _gerar_cortes_worker(path, segments, enable_fade_in, enable_fade_out, enable
         else:
             status = "falha"
 
-        resultados.append({
+        with lock_contadores:
+            contadores["em_andamento"] -= 1
+            contadores["concluidos"] += 1
+            _atualizar_progresso_geral()
+
+        tela.after(0, lambda i=i, status=status: txt_saida.insert(
+            tk.END, f"Clipe {i + 1}/{total_segments}: {status.upper()}\n"
+        ))
+
+        return {
             "title": title,
             "status": status,
             "arquivos": [caminho_saida_final] if status == "sucesso" else [],
-        })
+        }
 
-        tela.after(0, lambda i=i, total_segments=total_segments, status=status: txt_saida.insert(
-            tk.END, f"Clipe {i + 1}/{total_segments}: {status.upper()}\n"
-        ))
-        tela.after(0, lambda i=i: atualizar_janela_progresso(widgets_progresso, concluidos=i + 1, em_andamento=0))
+    ## Processamento dos segmentos — até PARALLEL_WORKERS ao mesmo tempo ##
+    resultados_por_indice = {}
+    with concurrent.futures.ThreadPoolExecutor(max_workers=PARALLEL_WORKERS) as executor:
+        futuros = {executor.submit(_processar_um, i, seg): i for i, seg in enumerate(segments)}
+        for futuro in concurrent.futures.as_completed(futuros):
+            i = futuros[futuro]
+            try:
+                resultados_por_indice[i] = futuro.result()
+            except Exception as e:
+                # Erro inesperado (fora dos tratados dentro de
+                # _processar_um) não pode travar o lote inteiro nem
+                # deixar a janela de progresso presa — vira "falha" e o
+                # resto continua normal, com o erro real registrado.
+                titulo = segments[i].get("title", f"segmento {i + 1}")
+                tela.after(0, lambda t=titulo, e=str(e): txt_saida.insert(
+                    tk.END, f"[ERRO] \"{t}\" falhou inesperadamente: {e}\n"
+                ))
+                resultados_por_indice[i] = {"title": titulo, "status": "falha", "arquivos": []}
+
+    # Reordena pro mesmo formato de sempre (ordem original dos capítulos),
+    # já que terminar em paralelo bagunça a ordem de conclusão.
+    resultados = [resultados_por_indice[i] for i in range(total_segments)]
 
     os.chdir(pasta_original)
     foi_cancelado = _cancelar_geracao["solicitado"]
@@ -2095,6 +2328,42 @@ def abrir_preview_capitulo(title, parte):
         messagebox.showinfo("Preview", "O preview desse capítulo ainda não foi gerado.")
 
 
+def _extrair_texto_capitulo_atual(seg):
+    """
+    Extrai o texto da transcrição CARREGADA AGORA (blocos_transcricao_atual)
+    pro intervalo desse capítulo. Fatorado de obter_metadata_ia_do_capitulo()
+    pra ser reaproveitado também pelo botão "Regenerar" da quote de
+    destaque na janela de metadata. Mostra o aviso de "não achei texto"
+    e devolve None se a transcrição carregada não cobre esse intervalo.
+    """
+    blocos = blocos_transcricao_atual
+    if not blocos:
+        return None
+
+    inicio_dt = datetime.strptime(seg["start"], "%H:%M:%S")
+    inicio_segundos = inicio_dt.hour * 3600 + inicio_dt.minute * 60 + inicio_dt.second
+
+    if seg["end"]:
+        fim_dt = datetime.strptime(seg["end"], "%H:%M:%S")
+        fim_segundos = fim_dt.hour * 3600 + fim_dt.minute * 60 + fim_dt.second
+    else:
+        fim_segundos = max((b["seconds"] for b in blocos), default=inicio_segundos) + 1
+
+    texto = " ".join(b["text"] for b in blocos if inicio_segundos <= b["seconds"] < fim_segundos)
+    if not texto.strip():
+        maior_timestamp = max((b["seconds"] for b in blocos), default=0)
+        messagebox.showinfo(
+            "Aviso",
+            f"Não achei texto da transcrição entre {seg['start']} e {seg['end'] or '(fim)'}.\n\n"
+            f"A transcrição carregada ({os.path.basename(caminho_transcricao_atual)}) vai até "
+            f"{maior_timestamp // 3600:02d}:{(maior_timestamp % 3600) // 60:02d}:{maior_timestamp % 60:02d} "
+            f"— confere se é a transcrição do episódio certo pra esse capítulo."
+        )
+        return None
+
+    return texto
+
+
 def obter_metadata_ia_do_capitulo(title, seg):
     """
     Devolve o metadata da IA (quote, texto de thumbnail, título) pra
@@ -2123,27 +2392,8 @@ def obter_metadata_ia_do_capitulo(title, seg):
         if not caminho_transcricao_atual:
             return {}
 
-    blocos = blocos_transcricao_atual
-
-    inicio_dt = datetime.strptime(seg["start"], "%H:%M:%S")
-    inicio_segundos = inicio_dt.hour * 3600 + inicio_dt.minute * 60 + inicio_dt.second
-
-    if seg["end"]:
-        fim_dt = datetime.strptime(seg["end"], "%H:%M:%S")
-        fim_segundos = fim_dt.hour * 3600 + fim_dt.minute * 60 + fim_dt.second
-    else:
-        fim_segundos = max((b["seconds"] for b in blocos), default=inicio_segundos) + 1
-
-    texto = " ".join(b["text"] for b in blocos if inicio_segundos <= b["seconds"] < fim_segundos)
-    if not texto.strip():
-        maior_timestamp = max((b["seconds"] for b in blocos), default=0)
-        messagebox.showinfo(
-            "Aviso",
-            f"Não achei texto da transcrição entre {seg['start']} e {seg['end'] or '(fim)'}.\n\n"
-            f"A transcrição carregada ({os.path.basename(caminho_transcricao_atual)}) vai até "
-            f"{maior_timestamp // 3600:02d}:{(maior_timestamp % 3600) // 60:02d}:{maior_timestamp % 60:02d} "
-            f"— confere se é a transcrição do episódio certo pra esse capítulo."
-        )
+    texto = _extrair_texto_capitulo_atual(seg)
+    if texto is None:
         return {}
 
     txt_saida.insert(tk.END, f"Gerando sugestão de texto com IA pra \"{title}\"...\n")
@@ -2195,6 +2445,14 @@ def mostrar_metadata_capitulo(title, seg):
     descrição, sugestão de imagem, texto de thumbnail — sem precisar
     abrir JSON na mão. Se ainda não tiver metadata gerado, oferece
     gerar na hora (mesma lógica do botão de thumbnail).
+
+    A fala de destaque (quote_destaque + texto de thumbnail) tem um
+    botão "Regenerar" — pra quando ela sai genérica/sem graça — com um
+    checkbox "Mais bombástico" que pede uma versão ainda mais
+    forte/polêmica na regeneração. Os dois campos são regenerados JUNTOS
+    porque o texto_thumbnail é o que vai literalmente escrito na imagem
+    da thumbnail, e precisa continuar falando do MESMO momento que a
+    quote de destaque — senão os dois ficam fora de sincronia.
     """
     dados_ia = obter_metadata_ia_do_capitulo(title, seg)
     if not dados_ia:
@@ -2203,7 +2461,7 @@ def mostrar_metadata_capitulo(title, seg):
 
     janela = tk.Toplevel(tela)
     janela.title(f"Metadata — {title}")
-    janela.geometry("520x480")
+    janela.geometry("520x620")
     janela.configure(bg="#7F14B7")
 
     def adicionar_linha(rotulo, valor):
@@ -2213,10 +2471,12 @@ def mostrar_metadata_capitulo(title, seg):
             frame_linha, text=rotulo, bg="#7F14B7", fg="#FEF500",
             font=("Industry-Black", 9, "bold")
         ).pack(anchor="w")
-        tk.Label(
+        lbl_valor = tk.Label(
             frame_linha, text=valor or "(vazio)", bg="#FFFFFF", fg="#000000",
             wraplength=480, justify="left", anchor="w"
-        ).pack(anchor="w", fill="x")
+        )
+        lbl_valor.pack(anchor="w", fill="x")
+        return lbl_valor
 
     probabilidade = dados_ia.get("probabilidade_corte")
     adicionar_linha("Título sugerido:", dados_ia.get("titulo"))
@@ -2224,19 +2484,87 @@ def mostrar_metadata_capitulo(title, seg):
         "Probabilidade de virar corte:",
         f"{probabilidade}%" if probabilidade is not None else None
     )
-    adicionar_linha("Quote de destaque:", dados_ia.get("quote_destaque"))
+
+    lbl_quote = adicionar_linha("Quote de destaque:", dados_ia.get("quote_destaque"))
+
+    texto_thumb_inicial = dados_ia.get("texto_thumbnail") or {}
+    lbl_thumb1 = adicionar_linha("Texto de thumbnail (linha 1):", texto_thumb_inicial.get("linha1"))
+    lbl_thumb2 = adicionar_linha("Texto de thumbnail (linha 2):", texto_thumb_inicial.get("linha2"))
+
+    frame_regen = tk.Frame(janela, bg="#7F14B7")
+    frame_regen.pack(fill="x", padx=12, pady=(0, 8), anchor="w")
+
+    var_bombastico = tk.BooleanVar(value=False)
+    tk.Checkbutton(
+        frame_regen, text="Mais bombástico", variable=var_bombastico,
+        bg="#7F14B7", fg="#FFFFFF", selectcolor="#7F14B7",
+        activebackground="#7F14B7", activeforeground="#FFFFFF",
+        font=("Industry-Black", 8)
+    ).pack(side="left")
+
+    lbl_status_regen = tk.Label(
+        frame_regen, text="", bg="#7F14B7", fg="#FFFFFF", font=("Industry-Black", 8)
+    )
+    lbl_status_regen.pack(side="left", padx=8)
+
+    def _regenerar_fala_destaque():
+        texto_capitulo = _extrair_texto_capitulo_atual(seg)
+        if texto_capitulo is None:
+            return  # _extrair_texto_capitulo_atual já mostrou o aviso
+
+        btn_regen_fala.config(state="disabled")
+        lbl_status_regen.config(text="Gerando de novo...")
+        bombastico = var_bombastico.get()
+
+        def _worker():
+            resultado = None
+            erro = None
+            try:
+                resultado = regenerar_fala_destaque(
+                    {"texto": texto_capitulo},
+                    titulo_atual=dados_ia.get("titulo"),
+                    bombastico=bombastico,
+                )
+            except Exception as e:
+                erro = str(e)
+
+            def _concluir():
+                btn_regen_fala.config(state="normal")
+                lbl_status_regen.config(text="")
+                if resultado and resultado.get("quote_destaque") and resultado.get("texto_thumbnail"):
+                    dados_ia["quote_destaque"] = resultado["quote_destaque"]
+                    dados_ia["quote_encontrada_exata"] = resultado.get("quote_encontrada_exata")
+                    dados_ia["quote_fracao_sequencial"] = resultado.get("quote_fracao_sequencial")
+                    dados_ia["texto_thumbnail"] = resultado["texto_thumbnail"]
+                    dados_ia["texto_thumbnail_fracao_sequencial"] = resultado.get("texto_thumbnail_fracao_sequencial")
+                    metadata_ia[title] = dados_ia
+                    salvar_estado_projeto()
+                    lbl_quote.config(text=dados_ia["quote_destaque"])
+                    lbl_thumb1.config(text=dados_ia["texto_thumbnail"].get("linha1") or "(vazio)")
+                    lbl_thumb2.config(text=dados_ia["texto_thumbnail"].get("linha2") or "(vazio)")
+                else:
+                    messagebox.showerror(
+                        "Erro na IA",
+                        f"Não consegui gerar uma nova fala de destaque:\n\n{erro or 'resposta vazia'}\n\n"
+                        "Confere se a GEMINI_API_KEY no .env está certa."
+                    )
+            tela.after(0, _concluir)
+
+        threading.Thread(target=_worker, daemon=True).start()
+
+    btn_regen_fala = tk.Button(
+        frame_regen, text="🔄 Regenerar fala de destaque (quote + thumb)", command=_regenerar_fala_destaque,
+        bg="#FFFFFF", fg="#7F14B7", font=("Industry-Black", 8, "bold")
+    )
+    btn_regen_fala.pack(side="left")
+
     adicionar_linha("Descrição:", dados_ia.get("descricao"))
     adicionar_linha("Sugestão de imagem:", dados_ia.get("sugestao_imagem"))
 
-    texto_thumb = dados_ia.get("texto_thumbnail")
-    if texto_thumb:
-        adicionar_linha("Texto de thumbnail (linha 1):", texto_thumb.get("linha1"))
-        adicionar_linha("Texto de thumbnail (linha 2):", texto_thumb.get("linha2"))
-    else:
-        adicionar_linha(
-            "Texto de thumbnail:",
-            "Não disponível — esse metadata é de antes desse campo existir, "
-            "ou veio de um JSON antigo. Gera de novo pra ter esse campo."
+    if not texto_thumb_inicial:
+        lbl_thumb1.config(
+            text="Não disponível — esse metadata é de antes desse campo existir, "
+            "ou veio de um JSON antigo. Gera de novo (ou clica Regenerar acima) pra ter esse campo."
         )
 
 
@@ -2856,6 +3184,18 @@ def gerar_capitulos_automaticamente():
     log("Detectando capítulos automaticamente...\n")
 
     def _worker():
+        status, detalhe = _detectar_e_converter_transcricao_colada(caminho_transcricao)
+        if status == "erro_leitura":
+            def _erro_leitura():
+                btn_gerar_automatico.config(state="normal")
+                messagebox.showerror("Erro", detalhe)
+            tela.after(0, _erro_leitura)
+            return
+        if status == "convertida":
+            log("Detectei transcrição colada do YouTube — convertida pro formato certo automaticamente.\n")
+        elif status == "erro_salvar":
+            log(f"[AVISO] {detalhe}\n")
+
         blocos = carregar_transcricao_ia(caminho_transcricao)
         fronteiras = sorted(detectar_capitulos(caminho_transcricao))
 
@@ -2901,6 +3241,8 @@ def gerar_capitulos_automaticamente():
             log(f"  [{i + 1}/{len(fronteiras)}] {timestamp_str} - {titulo}\n")
 
         def _concluir():
+            global caminho_transcricao_atual, blocos_transcricao_atual
+
             btn_gerar_automatico.config(state="normal")
 
             if erro_parou:
@@ -2911,6 +3253,14 @@ def gerar_capitulos_automaticamente():
                     "Confere se a GEMINI_API_KEY no .env está certa.\n\n"
                     f"Parando aqui — {i} de {len(fronteiras)} capítulos já foram processados."
                 )
+
+            # IMPORTANTE: essa transcrição vira a "atual" do projeto — sem
+            # isso, os capítulos gerados aqui ficavam desconectados da
+            # transcrição usada depois pra sugestão de metadata/thumbnail
+            # (que ficava com uma transcrição antiga, vazia, ou nenhuma).
+            caminho_transcricao_atual = caminho_transcricao
+            blocos_transcricao_atual = blocos
+            caminho_transcricao_var.set(caminho_transcricao)
 
             txt_entrada.delete("1.0", tk.END)
             txt_entrada.insert("1.0", "\n".join(linhas_timestamp))

@@ -2768,6 +2768,14 @@ def selecionar_frame_host(seg, titulo_janela="Selecionar frame do host"):
     timestamp específico em qualquer outra parte da live — pro caso do
     corte em si não ter um bom frame do host.
 
+    A extração dos frames (até 6 chamadas de ffmpeg, uma por candidato)
+    roda numa thread separada, em paralelo — antes rodava sequencial,
+    direto na thread principal, ANTES até de abrir essa janela, o que
+    travava o app inteiro (sem nenhuma resposta na tela) pelo tempo
+    inteiro da extração. Agora a janela abre na hora, mostrando "gerando
+    frames..." enquanto isso, e os botões "Escolher arquivo" / "Buscar
+    outro momento" já funcionam mesmo antes dos candidatos aparecerem.
+
     Retorna o caminho do frame escolhido, ou None se cancelado.
     """
     path = get_video_source()
@@ -2790,8 +2798,7 @@ def selecionar_frame_host(seg, titulo_janela="Selecionar frame do host"):
     pasta_temp = os.path.join(PASTA_BASE, "_frames_candidatos")
     os.makedirs(pasta_temp, exist_ok=True)
 
-    caminhos_candidatos = []
-    for i in range(n_candidatos):
+    def _extrair_um_candidato(i):
         segundo_candidato = inicio_segundos + int(passo * i)
         h, resto = divmod(segundo_candidato, 3600)
         m, s = divmod(resto, 60)
@@ -2803,7 +2810,8 @@ def selecionar_frame_host(seg, titulo_janela="Selecionar frame do host"):
             capture_output=True, text=True
         )
         if os.path.exists(caminho_candidato):
-            caminhos_candidatos.append((ts_str, caminho_candidato))
+            return (ts_str, caminho_candidato)
+        return None
 
     resultado = {"caminho": None}
 
@@ -2820,23 +2828,63 @@ def selecionar_frame_host(seg, titulo_janela="Selecionar frame do host"):
     frame_grade = tk.Frame(janela, bg="#7F14B7")
     frame_grade.pack(padx=10, pady=5)
 
+    lbl_carregando = tk.Label(
+        frame_grade, text=f"Gerando {n_candidatos} frames candidatos, aguarde...",
+        bg="#7F14B7", fg="#FFFFFF", font=("Industry-Black", 9)
+    )
+    lbl_carregando.pack(padx=20, pady=20)
+
     imagens_ref = []  # evita as miniaturas serem coletadas como lixo antes da janela fechar
 
     def escolher(caminho):
         resultado["caminho"] = caminho
         janela.destroy()
 
-    for i, (ts_str, caminho_candidato) in enumerate(caminhos_candidatos):
-        img = Image.open(caminho_candidato)
-        img.thumbnail((200, 200))
-        img_tk = ImageTk.PhotoImage(img)
-        imagens_ref.append(img_tk)
+    def _popular_com_candidatos(caminhos_candidatos):
+        if not janela.winfo_exists():
+            return  # usuário já fechou a janela (ex: escolheu arquivo manual) antes de terminar
 
-        frame_item = tk.Frame(frame_grade, bg="#FFFFFF")
-        frame_item.grid(row=i // 3, column=i % 3, padx=5, pady=5)
+        lbl_carregando.destroy()
 
-        tk.Button(frame_item, image=img_tk, command=lambda c=caminho_candidato: escolher(c)).pack()
-        tk.Label(frame_item, text=ts_str, bg="#FFFFFF").pack()
+        if not caminhos_candidatos:
+            tk.Label(
+                frame_grade,
+                text="Não consegui extrair nenhum frame candidato desse trecho.\n"
+                     "Tenta \"Buscar outro momento da live\" ou \"Escolher arquivo manualmente\".",
+                bg="#7F14B7", fg="#FFFFFF", wraplength=380, justify="left"
+            ).pack(padx=10, pady=10)
+            return
+
+        for i, (ts_str, caminho_candidato) in enumerate(caminhos_candidatos):
+            img = Image.open(caminho_candidato)
+            img.thumbnail((200, 200))
+            img_tk = ImageTk.PhotoImage(img)
+            imagens_ref.append(img_tk)
+
+            frame_item = tk.Frame(frame_grade, bg="#FFFFFF")
+            frame_item.grid(row=i // 3, column=i % 3, padx=5, pady=5)
+
+            tk.Button(frame_item, image=img_tk, command=lambda c=caminho_candidato: escolher(c)).pack()
+            tk.Label(frame_item, text=ts_str, bg="#FFFFFF").pack()
+
+    def _extrair_candidatos_worker():
+        candidatos_por_indice = {}
+        with concurrent.futures.ThreadPoolExecutor(max_workers=min(4, n_candidatos)) as executor:
+            futuros = {executor.submit(_extrair_um_candidato, i): i for i in range(n_candidatos)}
+            for futuro in concurrent.futures.as_completed(futuros):
+                i = futuros[futuro]
+                try:
+                    candidatos_por_indice[i] = futuro.result()
+                except Exception:
+                    candidatos_por_indice[i] = None
+
+        # Reordena pela ordem original dos timestamps (terminar em paralelo bagunça a ordem de conclusão)
+        caminhos_candidatos = [
+            candidatos_por_indice[i] for i in range(n_candidatos) if candidatos_por_indice.get(i)
+        ]
+        tela.after(0, lambda: _popular_com_candidatos(caminhos_candidatos))
+
+    threading.Thread(target=_extrair_candidatos_worker, daemon=True).start()
 
     def escolher_arquivo():
         caminho = filedialog.askopenfilename(

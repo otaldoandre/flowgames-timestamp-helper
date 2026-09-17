@@ -5,6 +5,12 @@ __pycache__/
 cortes - */
 preview - */
 thumbnails/
+# pastas de projeto por episódio (geradas pelo app)
+*/cortes/
+*/preview/
+*/thumbnail/
+*/estado.json
+*/transcricao_*.txt
 
 .env
 
@@ -12,3 +18,13 @@ _projetos.json
 estado.json
 client_secret.json
 token.json
+
+cookies.txt
+bin/
+.idea/
+_frame_scrubber_live.jpg
+_frames_candidatos/
+scripts/dados_cortes_flow_games/
+scripts/dados_flow_games/
+
+

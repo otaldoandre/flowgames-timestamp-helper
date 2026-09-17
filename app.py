@@ -2328,6 +2328,22 @@ def abrir_preview_capitulo(title, parte):
         messagebox.showinfo("Preview", "O preview desse capítulo ainda não foi gerado.")
 
 
+def _texto_aviso_confianca(fracao_sequencial):
+    """
+    Aviso curto pra mostrar na janela de metadata quando uma quote ou
+    texto de thumbnail pode não ter sido dito literalmente pelo host —
+    baseado na mesma fração sequencial que verificar_quote() já calcula
+    (gerar_metadata_capitulo.py). None quando bate o suficiente (>=85%
+    das palavras, na ordem certa, achadas na transcrição original).
+    """
+    if fracao_sequencial is None or fracao_sequencial >= 0.85:
+        return None
+    return (
+        f"⚠️ Só {round(fracao_sequencial * 100)}% das palavras batem em ordem com a "
+        "transcrição — pode ter sido reformulada ou inventada pela IA."
+    )
+
+
 def _extrair_texto_capitulo_atual(seg):
     """
     Extrai o texto da transcrição CARREGADA AGORA (blocos_transcricao_atual)
@@ -2486,10 +2502,36 @@ def mostrar_metadata_capitulo(title, seg):
     )
 
     lbl_quote = adicionar_linha("Quote de destaque:", dados_ia.get("quote_destaque"))
+    lbl_aviso_quote = tk.Label(
+        janela, text="", bg="#7F14B7", fg="#FFD400", font=("Industry-Black", 8),
+        wraplength=480, justify="left"
+    )
+    lbl_aviso_quote.pack(fill="x", padx=12, pady=(0, 4), anchor="w")
 
     texto_thumb_inicial = dados_ia.get("texto_thumbnail") or {}
     lbl_thumb1 = adicionar_linha("Texto de thumbnail (linha 1):", texto_thumb_inicial.get("linha1"))
     lbl_thumb2 = adicionar_linha("Texto de thumbnail (linha 2):", texto_thumb_inicial.get("linha2"))
+    lbl_aviso_thumb = tk.Label(
+        janela, text="", bg="#7F14B7", fg="#FFD400", font=("Industry-Black", 8),
+        wraplength=480, justify="left"
+    )
+    lbl_aviso_thumb.pack(fill="x", padx=12, pady=(0, 4), anchor="w")
+
+    def _atualizar_avisos_confianca():
+        # A validação (verificar_quote) já rodava desde antes dessa
+        # sessão, mas o resultado só ia pro JSON/console — nunca
+        # aparecia pra quem usa o app. Sem isso, uma quote inventada ou
+        # muito parafraseada passa batido até alguém abrir o JSON na
+        # mão. None (sem "aviso") quando a maior parte das palavras
+        # bate em ordem com a transcrição original.
+        lbl_aviso_quote.config(
+            text=_texto_aviso_confianca(dados_ia.get("quote_fracao_sequencial")) or ""
+        )
+        lbl_aviso_thumb.config(
+            text=_texto_aviso_confianca(dados_ia.get("texto_thumbnail_fracao_sequencial")) or ""
+        )
+
+    _atualizar_avisos_confianca()
 
     frame_regen = tk.Frame(janela, bg="#7F14B7")
     frame_regen.pack(fill="x", padx=12, pady=(0, 8), anchor="w")
@@ -2542,6 +2584,7 @@ def mostrar_metadata_capitulo(title, seg):
                     lbl_quote.config(text=dados_ia["quote_destaque"])
                     lbl_thumb1.config(text=dados_ia["texto_thumbnail"].get("linha1") or "(vazio)")
                     lbl_thumb2.config(text=dados_ia["texto_thumbnail"].get("linha2") or "(vazio)")
+                    _atualizar_avisos_confianca()
                 else:
                     messagebox.showerror(
                         "Erro na IA",

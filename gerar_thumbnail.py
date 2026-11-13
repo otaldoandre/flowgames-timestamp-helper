@@ -95,18 +95,77 @@ try {{
         return {{ left: b[0].as("px"), top: b[1].as("px"), right: b[2].as("px"), bottom: b[3].as("px") }};
     }}
 
+    function acharGrupo(grupoNome) {{
+        try {{
+            return app.activeDocument.layerSets.getByName(grupoNome);
+        }} catch (e) {{
+            throw new Error('O template não tem o grupo "' + grupoNome + '".');
+        }}
+    }}
+
+    // As camadas que o script preenche são achadas pelo TIPO dentro do
+    // grupo, não só pelo nome — o nome é só a primeira tentativa. Assim
+    // o template continua funcionando se uma camada for renomeada (o
+    // Photoshop renomeia sozinho a camada de texto quando o texto é
+    // editado). A camada e o grupo são deixados visíveis: uma camada
+    // preenchida mas oculta sairia em branco na thumbnail.
+    function acharSmartObject(grupoNome, nomePreferido) {{
+        var grupo = acharGrupo(grupoNome);
+        var camada = null;
+        try {{
+            var porNome = grupo.artLayers.getByName(nomePreferido);
+            if (porNome.kind == LayerKind.SMARTOBJECT) {{
+                camada = porNome;
+            }}
+        }} catch (e) {{
+            // não tem camada com esse nome — procura pelo tipo abaixo
+        }}
+        if (camada === null) {{
+            for (var i = 0; i < grupo.artLayers.length; i++) {{
+                if (grupo.artLayers[i].kind == LayerKind.SMARTOBJECT) {{
+                    camada = grupo.artLayers[i];
+                    break;
+                }}
+            }}
+        }}
+        if (camada === null) {{
+            throw new Error('O grupo "' + grupoNome + '" do template não tem nenhum smart object pra receber a imagem.');
+        }}
+        grupo.visible = true;
+        camada.visible = true;
+        return camada;
+    }}
+
+    // As duas linhas de texto são achadas pela POSIÇÃO: das camadas de
+    // texto do grupo, a de cima é a linha 1 e a de baixo é a linha 2.
+    function acharLinhasDeTexto(grupoNome) {{
+        var grupo = acharGrupo(grupoNome);
+        var textos = [];
+        for (var i = 0; i < grupo.artLayers.length; i++) {{
+            if (grupo.artLayers[i].kind == LayerKind.TEXT) {{
+                textos.push(grupo.artLayers[i]);
+            }}
+        }}
+        if (textos.length < 2) {{
+            throw new Error('O grupo "' + grupoNome + '" do template precisa de 2 camadas de texto (achei ' + textos.length + ').');
+        }}
+        textos.sort(function (a, b) {{
+            return a.bounds[1].as("px") - b.bounds[1].as("px");
+        }});
+        grupo.visible = true;
+        textos[0].visible = true;
+        textos[1].visible = true;
+        return textos;
+    }}
+
     function moverCamada(grupoNome, camadaNome, xAlvo, yAlvo) {{
-        var doc = app.activeDocument;
-        var grupo = doc.layerSets.getByName(grupoNome);
-        var camada = grupo.artLayers.getByName(camadaNome);
+        var camada = acharSmartObject(grupoNome, camadaNome);
         var b = obterBoundsPx(camada);
         camada.translate(xAlvo - b.left, yAlvo - b.top);
     }}
 
     function redimensionarCamada(grupoNome, camadaNome, larguraAlvo, alturaAlvo) {{
-        var doc = app.activeDocument;
-        var grupo = doc.layerSets.getByName(grupoNome);
-        var camada = grupo.artLayers.getByName(camadaNome);
+        var camada = acharSmartObject(grupoNome, camadaNome);
         var b = obterBoundsPx(camada);
         var larguraAtual = b.right - b.left;
         var alturaAtual = b.bottom - b.top;
@@ -114,17 +173,16 @@ try {{
     }}
 
     function moverGrupo(grupoNome, xAlvo, yAlvo) {{
-        var doc = app.activeDocument;
-        var grupo = doc.layerSets.getByName(grupoNome);
+        var grupo = acharGrupo(grupoNome);
         var b = obterBoundsPx(grupo);
         grupo.translate(xAlvo - b.left, yAlvo - b.top);
     }}
 
     function copiarEstiloDeCamada(grupoNome, camadaOrigemNome, camadaDestinoNome) {{
         var doc = app.activeDocument;
-        var grupo = doc.layerSets.getByName(grupoNome);
+        var grupo = acharGrupo(grupoNome);
         var origem = grupo.artLayers.getByName(camadaOrigemNome);
-        var destino = grupo.artLayers.getByName(camadaDestinoNome);
+        var destino = acharSmartObject(grupoNome, camadaDestinoNome);
 
         doc.activeLayer = origem;
         var idCopyEffects = stringIDToTypeID("copyEffects");
@@ -142,8 +200,7 @@ try {{
         }}
 
         var doc = app.activeDocument;
-        var grupo = doc.layerSets.getByName(grupoNome);
-        var camada = grupo.artLayers.getByName(camadaNome);
+        var camada = acharSmartObject(grupoNome, camadaNome);
         doc.activeLayer = camada;
 
         var idPlaced = stringIDToTypeID("placedLayerReplaceContents");
@@ -152,10 +209,7 @@ try {{
         executeAction(idPlaced, desc, DialogModes.NO);
     }}
 
-    function definirTexto(grupoNome, camadaNome, textoNovo, deslocamentoX) {{
-        var doc = app.activeDocument;
-        var grupo = doc.layerSets.getByName(grupoNome);
-        var camada = grupo.artLayers.getByName(camadaNome);
+    function definirTexto(camada, textoNovo, deslocamentoX) {{
         camada.textItem.contents = textoNovo;
         if (deslocamentoX !== 0) {{
             camada.translate(deslocamentoX, 0);
@@ -170,22 +224,28 @@ try {{
     etapaAtual = "abrindo template";
     doc = app.open(arquivoTemplate);
 
-    etapaAtual = "trocando imagem sugerida (IMAGEM / Camada 7)";
+    etapaAtual = "trocando imagem sugerida (smart object do grupo IMAGEM)";
     substituirSmartObject("IMAGEM", "Camada 7", "{escapar_caminho_jsx(caminho_imagem)}");
 
-    etapaAtual = "trocando frame do host (CONVIDADO / Camada 10)";
+    etapaAtual = "trocando frame do host (smart object do grupo CONVIDADO)";
     substituirSmartObject("CONVIDADO", "Camada 10", "{escapar_caminho_jsx(caminho_frame)}");
 
-    etapaAtual = "copiando estilo de sombra (Layer 23 -> Camada 10)";
+    etapaAtual = "copiando estilo de sombra (Layer 23 -> smart object do host)";
 {"    copiarEstiloDeCamada(\"CONVIDADO\", \"Layer 23\", \"Camada 10\");" if copiar_sombra else "    // desligado por agora — aplica a sombra manualmente no .psd exportado"}
 
     etapaAtual = "aplicando layout (redimensionar/mover CONVIDADO e TXT)";
 {trecho_layout}
+    // As duas camadas são localizadas ANTES de mexer em qualquer texto:
+    // trocar o texto muda o tamanho da camada, e a ordem (cima/baixo)
+    // tem que ser a do template original.
+    etapaAtual = "localizando as duas linhas de texto (grupo TXT)";
+    var linhasDeTexto = acharLinhasDeTexto("TXT");
+
     etapaAtual = "definindo texto linha 1";
-    definirTexto("TXT", "VAMOS TRAZER", "{escapar_texto_jsx(linha1)}", {deslocamento_texto_x});
+    definirTexto(linhasDeTexto[0], "{escapar_texto_jsx(linha1)}", {deslocamento_texto_x});
 
     etapaAtual = "definindo texto linha 2";
-    definirTexto("TXT", "O DUBLADOR AQUI!", "{escapar_texto_jsx(linha2)}", {deslocamento_texto_x});
+    definirTexto(linhasDeTexto[1], "{escapar_texto_jsx(linha2)}", {deslocamento_texto_x});
 
     etapaAtual = "exportando PNG";
     var pngOpts = new PNGSaveOptions();

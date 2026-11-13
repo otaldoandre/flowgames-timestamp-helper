@@ -84,6 +84,7 @@ from gerar_metadata_capitulo import (
     carregar_json, selecionar_exemplos_few_shot, avaliar_capitulo, regenerar_fala_destaque,
     gerar_mais_titulos, gerar_mais_textos_thumbnail, normalizar_opcoes_texto_thumbnail,
 )
+from verificar_template import verificar_template
 from PIL import Image, ImageTk
 
 # Caminhos específicos da máquina — vêm do .env, não hardcoded, porque
@@ -4209,6 +4210,21 @@ def gerar_thumbnail_para_capitulo(title, seg):
     """
     path = get_video_source()
     if not path:
+        return
+
+    # Confere o template ANTES de pedir imagem/frame: se ele foi alterado
+    # de um jeito que quebra a automação, avisa já com o motivo, em vez
+    # de falhar lá no Photoshop depois de todo o trabalho de escolher.
+    problemas_template = verificar_template(CAMINHO_TEMPLATE_THUMBNAIL)
+    if problemas_template:
+        messagebox.showerror(
+            "Template da thumbnail",
+            "O template não serve pra gerar a thumbnail automaticamente:\n\n"
+            + "\n".join(f"- {problema}" for problema in problemas_template)
+            + f"\n\nArquivo: {CAMINHO_TEMPLATE_THUMBNAIL}\n\n"
+            "Isso costuma acontecer quando uma thumbnail é salva por cima do template. "
+            "Restaure o template original (ou recrie no Photoshop o que falta) e tente de novo."
+        )
         return
 
     caminho_imagem_sugerida = filedialog.askopenfilename(

@@ -500,6 +500,10 @@ TRANSICAO_EMENDA_SEGUNDOS = 0.4
 # removido e a borda do capítulo) com menos que isso é descartado junto.
 DURACAO_MINIMA_TRECHO_MANTIDO = 1.0
 
+# No preview das emendas ("Ver emendas" no editor de trechos): quantos
+# segundos mostrar antes e depois de cada corte.
+PREVIEW_EMENDA_MARGEM_SEGUNDOS = 3.0
+
 # Guarda a transcrição selecionada uma vez, pra não pedir de novo a
 # cada capítulo — só reseta fechando e abrindo o programa (ou trocando
 # na função reset se você adicionar isso depois)
@@ -1837,11 +1841,13 @@ def calcular_trechos_mantidos(inicio, fim, remover, duracao_minima=DURACAO_MINIM
     return mantidos
 
 
-def montar_grafo_juncao(duracoes, transicao, fps):
+def montar_grafo_juncao(duracoes, transicao, fps, primeira_entrada=0, sufixo=""):
     """
-    Monta a parte do filter_complex do ffmpeg que junta N trechos (as
-    entradas 0..N-1 do comando) num vídeo só, [vj], e num áudio só, [aj].
-    Devolve (lista de filtros, duração total do resultado em segundos).
+    Monta a parte do filter_complex do ffmpeg que junta N trechos num
+    vídeo só, [vj], e num áudio só, [aj]. Os trechos são N entradas
+    seguidas do comando, a partir de `primeira_entrada` (0 no corte
+    normal). Devolve (lista de filtros, duração total do resultado em
+    segundos).
 
     Com `transicao` > 0, cada emenda ganha um cross dissolve no vídeo
     (xfade) e um crossfade no áudio (acrossfade) com essa duração — o
@@ -1853,33 +1859,108 @@ def montar_grafo_juncao(duracoes, transicao, fps):
     posicionado pelo tempo em que o trecho anterior acaba — por isso o
     fps do vídeo entra aqui e as `duracoes` devem ser múltiplos exatos de
     um quadro.
+
+    `sufixo` diferencia os rótulos quando o mesmo comando tem mais de uma
+    junção independente (o preview das emendas tem uma por emenda): com
+    sufixo "2" as saídas viram [vj_2] e [aj_2].
     """
     n = len(duracoes)
+    marca = f"_{sufixo}" if sufixo != "" else ""
+    saida_final_video = f"[vj{marca}]"
+    saida_final_audio = f"[aj{marca}]"
+
+    def entrada(i):
+        return primeira_entrada + i
 
     if transicao <= 0:
-        entradas = "".join(f"[{i}:v][{i}:a]" for i in range(n))
-        return [f"{entradas}concat=n={n}:v=1:a=1[vj][aj]"], sum(duracoes)
+        entradas = "".join(f"[{entrada(i)}:v][{entrada(i)}:a]" for i in range(n))
+        return [f"{entradas}concat=n={n}:v=1:a=1{saida_final_video}{saida_final_audio}"], sum(duracoes)
 
-    filtros = [f"[{i}:v]fps={fps:.5f},format=yuv420p[s{i}]" for i in range(n)]
+    filtros = [f"[{entrada(i)}:v]fps={fps:.5f},format=yuv420p[s{i}{marca}]" for i in range(n)]
 
-    video = "[s0]"
-    audio = "[0:a]"
+    video = f"[s0{marca}]"
+    audio = f"[{entrada(0)}:a]"
     acumulado = duracoes[0]
     for i in range(1, n):
         ultimo = i == n - 1
-        saida_video = "[vj]" if ultimo else f"[x{i}]"
-        saida_audio = "[aj]" if ultimo else f"[y{i}]"
+        saida_video = saida_final_video if ultimo else f"[x{i}{marca}]"
+        saida_audio = saida_final_audio if ultimo else f"[y{i}{marca}]"
         # A transição começa `transicao` segundos antes do fim do que já
         # foi juntado até aqui.
         offset = acumulado - transicao
         filtros.append(
-            f"{video}[s{i}]xfade=transition=fade:duration={transicao:.3f}:offset={offset:.3f}{saida_video}"
+            f"{video}[s{i}{marca}]xfade=transition=fade:duration={transicao:.3f}:offset={offset:.3f}{saida_video}"
         )
-        filtros.append(f"{audio}[{i}:a]acrossfade=d={transicao:.3f}{saida_audio}")
+        filtros.append(f"{audio}[{entrada(i)}:a]acrossfade=d={transicao:.3f}{saida_audio}")
         video, audio = saida_video, saida_audio
         acumulado += duracoes[i] - transicao
 
     return filtros, acumulado
+
+
+def escolher_transicao_emenda(duracoes, habilitada):
+    """
+    Duração da transição a usar nas emendas de um capítulo: a padrão
+    (TRANSICAO_EMENDA_SEGUNDOS) se "Transição nas emendas" estiver
+    marcada, ou 0 (corte seco) se estiver desmarcada ou se algum trecho
+    mantido for curto demais pra caber a transição dos dois lados dele.
+    """
+    transicao = TRANSICAO_EMENDA_SEGUNDOS if habilitada else 0
+    if min(duracoes) <= 2 * transicao:
+        return 0
+    return transicao
+
+
+def montar_comando_preview_emendas(path, mantidos, fps, transicao, caminho_saida, margem=PREVIEW_EMENDA_MARGEM_SEGUNDOS):
+    """
+    Comando ffmpeg que gera o preview das emendas de um capítulo: pra
+    cada emenda, os últimos `margem` segundos antes do corte e os
+    primeiros `margem` depois, juntados do MESMO jeito que no corte final
+    (mesma transição) — e uma emenda depois da outra, num arquivo só.
+    Serve pra conferir se cada corte ficou no ponto certo sem ter que
+    renderizar o capítulo inteiro.
+
+    `mantidos` é a lista de trechos que sobram (calcular_trechos_mantidos);
+    precisa ter pelo menos dois, senão não existe emenda.
+    """
+    entradas = []
+    grafo = []
+    saidas = []
+    for k in range(len(mantidos) - 1):
+        inicio_antes, fim_antes = mantidos[k]
+        inicio_depois, fim_depois = mantidos[k + 1]
+
+        inicio_antes = max(inicio_antes, fim_antes - margem)
+        fim_depois = min(fim_depois, inicio_depois + margem)
+
+        duracoes = [
+            round((fim_antes - inicio_antes) * fps) / fps,
+            round((fim_depois - inicio_depois) * fps) / fps,
+        ]
+        entradas.append(f'-ss {inicio_antes:.3f} -t {duracoes[0]:.3f} -i "{path}"')
+        entradas.append(f'-ss {inicio_depois:.3f} -t {duracoes[1]:.3f} -i "{path}"')
+
+        filtros, _ = montar_grafo_juncao(duracoes, transicao, fps, primeira_entrada=2 * k, sufixo=str(k))
+        grafo.extend(filtros)
+        saidas.append((f"[vj_{k}]", f"[aj_{k}]"))
+
+    if len(saidas) == 1:
+        video_final, audio_final = saidas[0]
+    else:
+        todas = "".join(video + audio for video, audio in saidas)
+        grafo.append(f"{todas}concat=n={len(saidas)}:v=1:a=1[outv][outa]")
+        video_final, audio_final = "[outv]", "[outa]"
+
+    # Sempre pela CPU, rápido: são poucos segundos de vídeo, não compensa
+    # depender do driver da GPU pra isso.
+    return (
+        f'ffmpeg -y '
+        f'{" ".join(entradas)} '
+        f'-filter_complex "{";".join(grafo)}" '
+        f'-map "{video_final}" -map "{audio_final}" '
+        f'-c:v libx264 -preset veryfast -crf 23 -pix_fmt yuv420p '
+        f'"{caminho_saida}"'
+    )
 
 
 def generate_clips():
@@ -2125,9 +2206,7 @@ def _gerar_cortes_worker(path, segments, enable_fade_in, enable_fade_out, enable
                 fps = obter_fps_video(path)
                 duracoes = [round((fim - inicio) * fps) / fps for inicio, fim in mantidos]
 
-                transicao = TRANSICAO_EMENDA_SEGUNDOS if enable_transicao else 0
-                if min(duracoes) <= 2 * transicao:
-                    transicao = 0  # trecho curto demais pra caber a transição dos dois lados
+                transicao = escolher_transicao_emenda(duracoes, enable_transicao)
 
                 filtros_juncao, total_seconds = montar_grafo_juncao(duracoes, transicao, fps)
                 juncao = (
@@ -2578,7 +2657,18 @@ def _extrair_texto_capitulo_atual(seg):
     else:
         fim_segundos = max((b["seconds"] for b in blocos), default=inicio_segundos) + 1
 
-    texto = " ".join(b["text"] for b in blocos if inicio_segundos <= b["seconds"] < fim_segundos)
+    # Pula as falas que caem dentro de um trecho removido do capítulo (ex:
+    # a leitura de um ad) — elas não vão estar no corte, então não podem
+    # virar título, quote ou texto de thumbnail.
+    removidos = trechos_removidos.get(seg.get("title"), [])
+
+    def _foi_removido(segundos):
+        return any(inicio <= segundos < fim for inicio, fim in removidos)
+
+    texto = " ".join(
+        b["text"] for b in blocos
+        if inicio_segundos <= b["seconds"] < fim_segundos and not _foi_removido(b["seconds"])
+    )
     if not texto.strip():
         maior_timestamp = max((b["seconds"] for b in blocos), default=0)
         messagebox.showinfo(
@@ -3569,7 +3659,8 @@ def abrir_editor_trechos(title, seg):
         messagebox.showerror("Erro", "Não consegui determinar a duração do vídeo.")
         return
 
-    duracao_frame = 1.0 / obter_fps_video(path)
+    fps_video = obter_fps_video(path)
+    duracao_frame = 1.0 / fps_video
     inicio_cap = _hhmmss_para_segundos(seg["start"])
     fim_cap = _hhmmss_para_segundos(seg["end"]) if seg["end"] else duracao_total
 
@@ -3726,6 +3817,83 @@ def abrir_editor_trechos(title, seg):
             frame_acoes, text=rotulo, command=lambda p=ponta: _ir_para(p),
             bg="#FFFFFF", fg="#7F14B7", font=("Industry-Black", 8, "bold")
         ).pack(side="left", padx=3)
+
+    # ---- Ver emendas: preview gerado na hora, do que está na caixa ----
+    ROTULO_VER_EMENDAS = "▶ Ver emendas"
+
+    def _ver_emendas():
+        intervalos, erros = _ler_caixa()
+        if erros:
+            messagebox.showerror(
+                "Trechos", "Corrija antes de ver as emendas:\n\n" + "\n".join(erros), parent=janela
+            )
+            return
+
+        mantidos = calcular_trechos_mantidos(inicio_cap, fim_cap, intervalos)
+        if len(mantidos) < 2:
+            messagebox.showinfo(
+                "Trechos",
+                "Não tem emenda pra ver: com esses trechos o corte sai num pedaço só "
+                "(ou não sobra nada).",
+                parent=janela
+            )
+            return
+
+        # Mesmo critério de transição do corte final (ver _cortar_um).
+        duracoes = [round((fim - inicio) * fps_video) / fps_video for inicio, fim in mantidos]
+        transicao = escolher_transicao_emenda(duracoes, transicao_emenda_var.get())
+
+        pasta_preview = obter_pasta_preview_atual() or PASTA_BASE
+        os.makedirs(pasta_preview, exist_ok=True)
+        caminho_final = os.path.join(pasta_preview, f"{title}_preview_emendas.mp4")
+        caminho_temp = os.path.join(pasta_preview, f"temp_{title}_preview_emendas.mp4")
+        cmd = montar_comando_preview_emendas(path, mantidos, fps_video, transicao, caminho_temp)
+
+        btn_ver_emendas.config(state="disabled", text="Gerando…")
+
+        def _worker():
+            erro = None
+            try:
+                processo = subprocess.run(cmd, shell=True, capture_output=True, text=True, errors="replace")
+                if processo.returncode != 0 or not os.path.exists(caminho_temp):
+                    erro = (processo.stderr or "").strip()[-400:] or "o ffmpeg não gerou o arquivo"
+                else:
+                    try:
+                        os.replace(caminho_temp, caminho_final)
+                    except OSError:
+                        erro = (
+                            "Não consegui gravar o preview novo por cima do anterior — "
+                            "feche o player que está com ele aberto e tente de novo."
+                        )
+            except Exception as e:
+                erro = str(e)
+            finally:
+                if os.path.exists(caminho_temp):
+                    try:
+                        os.remove(caminho_temp)
+                    except OSError:
+                        pass
+
+            def _fim():
+                if janela.winfo_exists():
+                    btn_ver_emendas.config(state="normal", text=ROTULO_VER_EMENDAS)
+                    if erro:
+                        messagebox.showerror(
+                            "Trechos", f"Não consegui gerar o preview das emendas:\n\n{erro}", parent=janela
+                        )
+                        return
+                if not erro:
+                    os.startfile(caminho_final)
+
+            tela.after(0, _fim)
+
+        threading.Thread(target=_worker, daemon=True).start()
+
+    btn_ver_emendas = tk.Button(
+        frame_acoes, text=ROTULO_VER_EMENDAS, command=_ver_emendas,
+        bg="#FEF500", fg="#7F14B7", font=("Industry-Black", 8, "bold")
+    )
+    btn_ver_emendas.pack(side="left", padx=3)
 
     # ---- Salvar / cancelar ----
     def _salvar():

@@ -3359,18 +3359,30 @@ def gerar_capitulos_automaticamente():
     capítulo pode levar bastante tempo num episódio longo, e isso não
     pode travar a janela.
     """
-    caminho_transcricao = filedialog.askopenfilename(
-        title="Selecione a transcrição do episódio",
-        filetypes=[("Arquivos de texto", "*.txt")]
-    )
-    if not caminho_transcricao:
-        return
+    # Reaproveita a transcrição que já está carregada no projeto (baixada
+    # do YouTube ou escolhida em "Selecionar Transcrição") — só abre o
+    # seletor de arquivo quando ainda não tem nenhuma.
+    reaproveitada = bool(caminho_transcricao_atual and os.path.exists(caminho_transcricao_atual))
+    if reaproveitada:
+        caminho_transcricao = caminho_transcricao_atual
+    else:
+        caminho_transcricao = filedialog.askopenfilename(
+            title="Selecione a transcrição do episódio",
+            filetypes=[("Arquivos de texto", "*.txt")]
+        )
+        if not caminho_transcricao:
+            return
 
     btn_gerar_automatico.config(state="disabled")
 
     def log(msg):
         tela.after(0, lambda: (txt_saida.insert(tk.END, msg), txt_saida.see(tk.END)))
 
+    if reaproveitada:
+        log(
+            f"Usando a transcrição já carregada: {os.path.basename(caminho_transcricao)} "
+            "(pra usar outra, troque em \"Selecionar Transcrição\").\n"
+        )
     log("Detectando capítulos automaticamente...\n")
 
     def _worker():
@@ -3496,8 +3508,38 @@ canvas_principal.bind("<Configure>", _acompanhar_largura_canvas)
 canvas_principal.pack(side="left", fill="both", expand=True)
 scrollbar_principal.pack(side="right", fill="y")
 
+def _area_rolavel_sob_cursor(event):
+    """
+    Acha qual área com barra de rolagem deve responder à rodinha: sobe a
+    partir do widget que está embaixo do cursor até achar um Canvas
+    rolável que ainda tenha conteúdo escondido. Uma lista que já cabe
+    inteira é pulada, e aí quem rola é a área de fora (a página).
+
+    Para na borda da janela — a rodinha numa janela secundária (resultado,
+    metadata, etc.) não rola mais a tela principal que está atrás dela.
+    """
+    try:
+        widget = tela.winfo_containing(event.x_root, event.y_root)
+    except (KeyError, tk.TclError):
+        return None
+
+    while widget is not None:
+        if isinstance(widget, tk.Canvas) and widget.cget("yscrollcommand"):
+            if widget.yview() != (0.0, 1.0):
+                return widget
+        elif isinstance(widget, (tk.Tk, tk.Toplevel)):
+            return None
+        widget = widget.master
+    return None
+
+
 def _rolar_com_mouse(event):
-    canvas_principal.yview_scroll(int(-1 * (event.delta / 120)), "units")
+    # bind_all pega a rodinha do programa inteiro; antes rolava sempre a
+    # página principal, então a lista de capítulos (e qualquer outra
+    # lista com barra própria) nunca respondia à rodinha.
+    area = _area_rolavel_sob_cursor(event)
+    if area is not None:
+        area.yview_scroll(int(-1 * (event.delta / 120)), "units")
 
 canvas_principal.bind_all("<MouseWheel>", _rolar_com_mouse)
 

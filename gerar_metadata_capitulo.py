@@ -23,6 +23,10 @@ SEED_EXEMPLOS = 42
 
 MAX_TENTATIVAS = 3
 
+# Quantas opções de título e de texto de thumbnail o Gemini devolve por
+# vez — tanto na avaliação inicial quanto em cada "Gerar mais".
+N_OPCOES = 5
+
 # Perfil curto por programa — cada programa do Flow Games tem uma dinâmica
 # diferente de "o que vira corte", então tratar tudo como podcast genérico
 # perde sinal. RASCUNHO gerado a partir de padrões observados nos dados
@@ -138,10 +142,17 @@ def montar_prompt(exemplos, texto_capitulo, programa=None):
 
     return f"""Você é um editor de cortes do canal Flow Games. Sua tarefa é estimar
 a PROBABILIDADE de um trecho de podcast virar um corte (clipe) publicado
-no canal "Cortes do Flow Games", e gerar um rascunho de título, uma fala
-de destaque do host, uma descrição curta, um texto curto pra thumbnail
-e uma sugestão de imagem pra thumbnail — mesmo que a probabilidade seja
-baixa, o rascunho ajuda o editor a decidir.
+no canal "Cortes do Flow Games", e gerar um rascunho com {N_OPCOES} opções de
+título, uma fala de destaque do host, uma descrição curta, {N_OPCOES} opções de
+texto curto pra thumbnail e uma sugestão de imagem pra thumbnail — mesmo
+que a probabilidade seja baixa, o rascunho ajuda o editor a decidir.
+
+Sobre os titulos: são {N_OPCOES} opções pro editor ESCOLHER, então precisam ser
+realmente diferentes entre si — não a mesma frase com uma palavra
+trocada. Varie o ângulo (o fato/notícia em si, a opinião ou reação do
+host, a polêmica, uma pergunta que o corte responde), sempre no estilo
+dos títulos reais dos exemplos abaixo e sem prometer nada que o trecho
+não entrega. A primeira opção é a que você considera a melhor.
 
 IMPORTANTE sobre quem é o host: os exemplos abaixo são só pra calibrar o
 formato e o estilo da resposta — NÃO presuma que o trecho que você vai
@@ -168,7 +179,9 @@ pode ser uma frase inteira; o texto_thumbnail precisa ser bem mais
 curto — só cabe 3-5 palavras por linha, em 2 linhas, no template real
 do canal. Use palavras REAIS ditas pelo host nesse trecho (pode cortar
 uma frase maior, não precisa ser gramaticalmente completo), nunca
-invente.
+invente. São {N_OPCOES} opções pro editor escolher: cada uma de um momento ou
+recorte DIFERENTE do trecho (não a mesma frase com uma palavra
+trocada), a mais forte primeiro.
 
 Não existe resposta "certa" binária aqui — vários fatores fora do
 conteúdo em si (tempo de edição disponível no dia, se um assunto
@@ -192,12 +205,9 @@ Agora avalie o capítulo abaixo. Responda SOMENTE em JSON puro (sem
 markdown, sem ```), no formato exato:
 {{
   "probabilidade_corte": número inteiro de 0 a 100 (sua estimativa de quão provável é esse capítulo virar um corte publicado, baseado no padrão dos exemplos acima),
-  "titulo": "string (sempre preencha, mesmo se a probabilidade for baixa — é um rascunho pro editor avaliar)",
+  "titulos": [lista com exatamente {N_OPCOES} strings — {N_OPCOES} opções de título diferentes entre si, a melhor primeiro; sempre preencha, mesmo se a probabilidade for baixa (é um rascunho pro editor avaliar)],
   "quote_destaque": "frase REAL e bombástica do host (opinião/reação forte, não repete o título)",
-  "texto_thumbnail": {{
-    "linha1": "3-5 palavras REAIS do texto, ditas pelo host",
-    "linha2": "3-5 palavras REAIS do texto, continuando a linha1"
-  }},
+  "textos_thumbnail": [lista com exatamente {N_OPCOES} objetos, a opção mais forte primeiro, cada um no formato {{"linha1": "3-5 palavras REAIS do texto, ditas pelo host", "linha2": "3-5 palavras REAIS do texto, continuando a linha1"}}],
   "descricao": "1-2 linhas",
   "sugestao_imagem": "descrição do que mostrar na thumbnail"
 }}
@@ -456,15 +466,231 @@ def avaliar_capitulo(capitulo, exemplos, api_key=None):
         if not exata and fracao < 0.7:
             print(f"  [AVISO] Quote não parece real (só {fracao:.0%} das palavras batem em ordem no texto original)")
 
-    texto_thumb = resultado.get("texto_thumbnail")
-    if isinstance(texto_thumb, dict) and (texto_thumb.get("linha1") or texto_thumb.get("linha2")):
-        texto_completo = f"{texto_thumb.get('linha1', '')} {texto_thumb.get('linha2', '')}".strip()
-        exata_thumb, fracao_thumb = verificar_quote(texto_completo, capitulo["texto"])
-        resultado["texto_thumbnail_fracao_sequencial"] = round(fracao_thumb, 2)
-        if not exata_thumb and fracao_thumb < 0.7:
-            print(f"  [AVISO] Texto de thumbnail não parece real (só {fracao_thumb:.0%} das palavras batem em ordem)")
+    # Títulos: o Gemini devolve uma lista ("titulos"). "titulo" continua
+    # existindo e guarda a opção ESCOLHIDA (no início, a primeira) — é o
+    # campo que o resto do programa e os projetos já salvos usam. A lista
+    # completa fica em "opcoes_titulo". Se a resposta vier no formato
+    # antigo (só "titulo"), vira uma lista de uma opção só.
+    titulos_brutos = resultado.pop("titulos", None)
+    if not isinstance(titulos_brutos, list):
+        titulos_brutos = []
+    opcoes_titulo = normalizar_opcoes_titulo(titulos_brutos + [resultado.get("titulo")])
+    resultado["opcoes_titulo"] = opcoes_titulo
+    if opcoes_titulo:
+        resultado["titulo"] = opcoes_titulo[0]
+
+    # Textos de thumbnail: mesma ideia — "texto_thumbnail" é a opção
+    # escolhida, "opcoes_texto_thumbnail" é a lista, cada opção já com a
+    # conferência contra a transcrição (fracao_sequencial).
+    textos_brutos = resultado.pop("textos_thumbnail", None)
+    if not isinstance(textos_brutos, list):
+        textos_brutos = []
+    opcoes_thumb = normalizar_opcoes_texto_thumbnail(
+        textos_brutos + [resultado.get("texto_thumbnail")], capitulo["texto"]
+    )
+    resultado["opcoes_texto_thumbnail"] = opcoes_thumb
+    if opcoes_thumb:
+        escolhida = opcoes_thumb[0]
+        resultado["texto_thumbnail"] = {"linha1": escolhida["linha1"], "linha2": escolhida["linha2"]}
+        resultado["texto_thumbnail_fracao_sequencial"] = escolhida["fracao_sequencial"]
+        if escolhida["fracao_sequencial"] < 0.7:
+            print(f"  [AVISO] Texto de thumbnail não parece real (só {escolhida['fracao_sequencial']:.0%} das palavras batem em ordem)")
+    else:
+        resultado.pop("texto_thumbnail", None)
 
     return resultado
+
+
+def normalizar_opcoes_titulo(valores, ja_sugeridos=()):
+    """
+    Limpa uma lista de títulos vinda do Gemini: tira o que não é texto,
+    espaço sobrando e repetidos (inclusive repetidos de `ja_sugeridos`,
+    comparando sem pontuação nem maiúsculas). Mantém a ordem.
+    """
+    vistos = {normalizar_para_comparacao(t) for t in ja_sugeridos if isinstance(t, str)}
+    opcoes = []
+    for valor in valores or []:
+        if not isinstance(valor, str):
+            continue
+        titulo = valor.strip()
+        chave = normalizar_para_comparacao(titulo)
+        if not chave or chave in vistos:
+            continue
+        vistos.add(chave)
+        opcoes.append(titulo)
+    return opcoes
+
+
+def _texto_completo_thumbnail(opcao):
+    return f"{opcao.get('linha1') or ''} {opcao.get('linha2') or ''}".strip()
+
+
+def normalizar_opcoes_texto_thumbnail(valores, texto_capitulo, ja_sugeridos=()):
+    """
+    Limpa uma lista de textos de thumbnail vinda do Gemini e confere cada
+    um contra a transcrição. Devolve uma lista de dicts
+    {"linha1", "linha2", "fracao_sequencial"}, sem repetidos (nem
+    repetidos de `ja_sugeridos`), na mesma ordem.
+
+    fracao_sequencial é a mesma medida usada na quote_destaque: fração
+    das palavras que aparecem na transcrição NA ORDEM — baixo = o texto
+    pode ter sido reformulado ou inventado.
+    """
+    vistos = {
+        normalizar_para_comparacao(_texto_completo_thumbnail(o))
+        for o in ja_sugeridos if isinstance(o, dict)
+    }
+    opcoes = []
+    for valor in valores or []:
+        if not isinstance(valor, dict):
+            continue
+        linha1 = valor.get("linha1") if isinstance(valor.get("linha1"), str) else ""
+        linha2 = valor.get("linha2") if isinstance(valor.get("linha2"), str) else ""
+        opcao = {"linha1": linha1.strip(), "linha2": linha2.strip()}
+        texto_completo = _texto_completo_thumbnail(opcao)
+        chave = normalizar_para_comparacao(texto_completo)
+        if not chave or chave in vistos:
+            continue
+        vistos.add(chave)
+        _, fracao = verificar_quote(texto_completo, texto_capitulo)
+        opcao["fracao_sequencial"] = round(fracao, 2)
+        opcoes.append(opcao)
+    return opcoes
+
+
+def montar_prompt_mais_titulos(texto_capitulo, ja_sugeridos, exemplos=None, programa=None):
+    """
+    Prompt enxuto pro botão "Gerar mais" de títulos: não reavalia
+    probabilidade nem repete os textos dos exemplos (só os TÍTULOS reais
+    deles, que é o que calibra o estilo) — e lista o que já foi sugerido
+    pra não voltar a mesma coisa.
+    """
+    titulos_reais = [
+        ex["cortes_relacionados"][0]["titulo_corte"]
+        for ex in (exemplos or [])
+        if ex.get("virou_corte") and ex.get("cortes_relacionados")
+    ]
+    bloco_estilo = (
+        "\nTítulos REAIS de cortes já publicados no canal (referência de estilo, "
+        "não de assunto):\n" + "\n".join(f"- {t}" for t in titulos_reais) + "\n"
+        if titulos_reais else ""
+    )
+
+    perfil = PERFIS_PROGRAMA.get(programa)
+    bloco_perfil = f"\nContexto sobre o programa \"{programa}\":\n{perfil}\n" if perfil else ""
+
+    bloco_ja_sugeridos = (
+        "\nTítulos que JÁ foram sugeridos pra esse trecho — não repita nenhum "
+        "deles nem devolva uma variação mínima (mesma frase com uma palavra "
+        "trocada):\n" + "\n".join(f"- {t}" for t in ja_sugeridos) + "\n"
+        if ja_sugeridos else ""
+    )
+
+    return f"""Você é um editor de cortes do canal Flow Games, escrevendo opções de
+título pro corte (clipe) do trecho abaixo, que vai ser publicado no canal
+"Cortes do Flow Games".
+
+Escreva {N_OPCOES} opções NOVAS de título, realmente diferentes entre si: varie
+o ângulo (o fato/notícia em si, a opinião ou reação do host, a polêmica,
+uma pergunta que o corte responde). Não prometa nada que o trecho não
+entrega. Identifique quem fala e qual é o assunto SOMENTE pelo texto do
+trecho.
+{bloco_estilo}{bloco_perfil}{bloco_ja_sugeridos}
+Responda SOMENTE em JSON puro (sem markdown, sem ```), no formato exato:
+{{
+  "titulos": [lista com exatamente {N_OPCOES} strings, a melhor primeiro]
+}}
+
+Texto do trecho:
+{texto_capitulo[:3000]}
+"""
+
+
+def gerar_mais_titulos(capitulo, ja_sugeridos, exemplos=None, api_key=None):
+    """
+    Pede ao Gemini mais N_OPCOES títulos pro mesmo capítulo, diferentes
+    dos `ja_sugeridos`. Devolve a lista só com os NOVOS (pode vir com
+    menos de N_OPCOES se o modelo repetir algum), ou None se a chamada
+    falhar.
+    """
+    prompt = montar_prompt_mais_titulos(
+        capitulo["texto"], ja_sugeridos, exemplos=exemplos, programa=capitulo.get("programa")
+    )
+    resultado = chamar_gemini(prompt, api_key=api_key)
+
+    if not isinstance(resultado, dict) or not isinstance(resultado.get("titulos"), list):
+        return None
+
+    return normalizar_opcoes_titulo(resultado["titulos"], ja_sugeridos=ja_sugeridos)
+
+
+def montar_prompt_mais_textos_thumbnail(texto_capitulo, ja_sugeridos, titulo_atual=None, bombastico=False):
+    """
+    Prompt enxuto pro botão "Gerar mais" de texto de thumbnail — mesmas
+    regras do prompt principal (palavras REAIS do host, 3-5 por linha),
+    listando o que já foi sugerido pra não repetir.
+    """
+    instrucao_tom = (
+        "Modo MAIS BOMBÁSTICO: procure os momentos mais duros, polêmicos ou "
+        "emocionalmente carregados do host no trecho — o que geraria mais "
+        "reação/clique."
+        if bombastico else
+        "Procure os momentos que carregam as OPINIÕES ou REAÇÕES mais fortes "
+        "do host no trecho — não um resumo neutro do assunto."
+    )
+    bloco_titulo = (
+        f"\nO título já escolhido pra esse corte é: \"{titulo_atual}\" — o texto "
+        f"da thumbnail não pode ser uma reformulação dele; precisa trazer "
+        f"informação NOVA (a opinião, o motivo ou a reação por trás).\n"
+        if titulo_atual else ""
+    )
+    bloco_ja_sugeridos = (
+        "\nTextos que JÁ foram sugeridos pra esse trecho — não repita nenhum "
+        "deles nem devolva uma variação mínima:\n"
+        + "\n".join(f"- {_texto_completo_thumbnail(o)}" for o in ja_sugeridos if isinstance(o, dict))
+        + "\n"
+        if ja_sugeridos else ""
+    )
+
+    return f"""Você é um editor de cortes do canal Flow Games, escolhendo o texto
+que vai escrito na imagem da thumbnail do corte abaixo.
+
+{instrucao_tom}
+{bloco_titulo}
+Escreva {N_OPCOES} opções NOVAS, cada uma de um momento ou recorte DIFERENTE do
+trecho. Só cabe 3-5 palavras por linha, em 2 linhas, no template real do
+canal. Copie as palavras LITERALMENTE do texto abaixo (pode cortar o
+começo/fim de uma frase maior, não precisa ser gramaticalmente completo)
+— NUNCA parafraseie nem invente palavras que o host não disse.
+{bloco_ja_sugeridos}
+Responda SOMENTE em JSON puro (sem markdown, sem ```), no formato exato:
+{{
+  "textos_thumbnail": [lista com exatamente {N_OPCOES} objetos, a opção mais forte primeiro, cada um no formato {{"linha1": "3-5 palavras REAIS do texto", "linha2": "3-5 palavras REAIS do texto, continuando a linha1"}}]
+}}
+
+Texto do trecho:
+{texto_capitulo[:3000]}
+"""
+
+
+def gerar_mais_textos_thumbnail(capitulo, ja_sugeridos, titulo_atual=None, bombastico=False, api_key=None):
+    """
+    Pede ao Gemini mais N_OPCOES textos de thumbnail pro mesmo capítulo,
+    diferentes dos `ja_sugeridos` (lista de dicts com linha1/linha2).
+    Devolve a lista só com os NOVOS, cada um já conferido contra a
+    transcrição (fracao_sequencial), ou None se a chamada falhar.
+    """
+    prompt = montar_prompt_mais_textos_thumbnail(
+        capitulo["texto"], ja_sugeridos, titulo_atual=titulo_atual, bombastico=bombastico
+    )
+    resultado = chamar_gemini(prompt, api_key=api_key)
+
+    if not isinstance(resultado, dict) or not isinstance(resultado.get("textos_thumbnail"), list):
+        return None
+
+    return normalizar_opcoes_texto_thumbnail(
+        resultado["textos_thumbnail"], capitulo["texto"], ja_sugeridos=ja_sugeridos
+    )
 
 
 if __name__ == "__main__":

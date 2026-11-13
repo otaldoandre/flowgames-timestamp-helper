@@ -80,7 +80,10 @@ if not _email_autenticado:
 # cliente do Gemini dentro de gerar_metadata_capitulo) são importados só
 # na hora do uso, pra janela abrir rápido.
 from detectar_capitulos import detectar_capitulos, carregar_transcricao as carregar_transcricao_ia
-from gerar_metadata_capitulo import carregar_json, selecionar_exemplos_few_shot, avaliar_capitulo, regenerar_fala_destaque
+from gerar_metadata_capitulo import (
+    carregar_json, selecionar_exemplos_few_shot, avaliar_capitulo, regenerar_fala_destaque,
+    gerar_mais_titulos, gerar_mais_textos_thumbnail, normalizar_opcoes_texto_thumbnail,
+)
 from PIL import Image, ImageTk
 
 # Caminhos específicos da máquina — vêm do .env, não hardcoded, porque
@@ -2386,6 +2389,53 @@ def _extrair_texto_capitulo_atual(seg):
     return texto
 
 
+def _preparar_texto_para_metadata(title, seg, perguntar=True):
+    """
+    Parte interativa (thread principal) antes de chamar a IA pra um
+    capítulo: confirma com o usuário (se `perguntar`), garante que tem
+    transcrição carregada — pedindo o arquivo só se ainda não tiver
+    nenhuma — e extrai o texto do intervalo do capítulo.
+
+    Devolve o texto, ou None se o usuário desistiu ou não deu pra extrair
+    (nesse caso o aviso já foi mostrado).
+    """
+    if perguntar:
+        gerar_agora = messagebox.askyesno(
+            "Sugestão de texto pela IA",
+            f"Esse capítulo (\"{title}\") ainda não tem sugestão de texto da IA.\n\n"
+            "Quer gerar agora?"
+        )
+        if not gerar_agora:
+            return None
+
+    if not caminho_transcricao_atual:
+        selecionar_transcricao_manual()
+        if not caminho_transcricao_atual:
+            return None
+
+    if not blocos_transcricao_atual:
+        messagebox.showinfo(
+            "Aviso",
+            f"A transcrição carregada ({os.path.basename(caminho_transcricao_atual)}) está vazia "
+            "ou num formato que não reconheci — escolha outra em \"Selecionar Transcrição\"."
+        )
+        return None
+
+    return _extrair_texto_capitulo_atual(seg)
+
+
+def _gerar_metadata_ia(texto):
+    """
+    A chamada ao Gemini em si (título, quote, textos de thumbnail etc.)
+    pro texto de um capítulo. Não toca em nenhum widget, então pode rodar
+    numa thread separada. Devolve o dict de metadata, ou None se a IA não
+    respondeu direito; erro de chave/rede sobe como exceção.
+    """
+    treino = carregar_json(CAMINHO_TREINO_IA)
+    exemplos = selecionar_exemplos_few_shot(treino, programa=PROGRAMA_PROJETO_ATUAL)
+    return avaliar_capitulo({"texto": texto, "programa": PROGRAMA_PROJETO_ATUAL}, exemplos)
+
+
 def obter_metadata_ia_do_capitulo(title, seg):
     """
     Devolve o metadata da IA (quote, texto de thumbnail, título) pra
@@ -2394,27 +2444,16 @@ def obter_metadata_ia_do_capitulo(title, seg):
     transcrição — só na PRIMEIRA vez da sessão, reaproveita depois — e
     gera na hora, assim funciona mesmo quando os timestamps foram
     colados manualmente.
+
+    Versão que ESPERA a resposta (trava a janela enquanto a IA responde)
+    — usada pelo fluxo de thumbnail, que é uma sequência de diálogos. A
+    janela de metadata usa _gerar_metadata_ia() numa thread.
     """
     dados_ia = metadata_ia.get(title)
     if dados_ia is not None:
         return dados_ia
 
-    gerar_agora = messagebox.askyesno(
-        "Sugestão de texto pela IA",
-        f"Esse capítulo (\"{title}\") ainda não tem sugestão de texto da IA.\n\n"
-        "Quer gerar agora?"
-    )
-    if not gerar_agora:
-        return {}
-
-    global caminho_transcricao_atual, blocos_transcricao_atual
-
-    if not caminho_transcricao_atual:
-        selecionar_transcricao_manual()
-        if not caminho_transcricao_atual:
-            return {}
-
-    texto = _extrair_texto_capitulo_atual(seg)
+    texto = _preparar_texto_para_metadata(title, seg)
     if texto is None:
         return {}
 
@@ -2422,11 +2461,8 @@ def obter_metadata_ia_do_capitulo(title, seg):
     txt_saida.see(tk.END)
     tela.update_idletasks()
 
-    treino = carregar_json(CAMINHO_TREINO_IA)
-    exemplos = selecionar_exemplos_few_shot(treino, programa=PROGRAMA_PROJETO_ATUAL)
-
     try:
-        dados_ia = avaliar_capitulo({"texto": texto, "programa": PROGRAMA_PROJETO_ATUAL}, exemplos)
+        dados_ia = _gerar_metadata_ia(texto)
     except Exception as e:
         messagebox.showerror(
             "Erro na IA",
@@ -2460,161 +2496,527 @@ def dividir_texto_thumbnail(texto):
     return linha1, linha2
 
 
+def copiar_para_clipboard(texto, botao=None, rotulo_botao="Copiar"):
+    """Copia o texto pra área de transferência; se passar o botão, ele mostra "Copiado ✓" por um instante."""
+    tela.clipboard_clear()
+    tela.clipboard_append(texto or "")
+    if botao is not None:
+        botao.config(text="Copiado ✓")
+        botao.after(1200, lambda: botao.winfo_exists() and botao.config(text=rotulo_botao))
+
+
+def definir_texto_campo(campo, texto):
+    """Troca o texto de um campo criado por criar_campo_selecionavel()."""
+    campo.config(state="normal")
+    campo.delete("1.0", tk.END)
+    campo.insert("1.0", texto or "(vazio)")
+    campo.config(state="disabled")
+    campo.after_idle(campo.ajustar_altura)
+
+
+def criar_campo_selecionavel(pai, texto):
+    """
+    Caixa de texto somente leitura, mas SELECIONÁVEL — dá pra marcar um
+    pedaço com o mouse e copiar com Ctrl+C (um Label não deixa). A altura
+    acompanha o texto: cresce quando a linha quebra, encolhe quando a
+    janela alarga.
+    """
+    campo = tk.Text(
+        pai, height=1, width=1, wrap="word", bg="#FFFFFF", fg="#000000",
+        relief="flat", font="TkDefaultFont", padx=6, pady=4, cursor="xterm",
+        highlightthickness=0, inactiveselectbackground="#D9C2EC"
+    )
+
+    def ajustar_altura(event=None):
+        if not campo.winfo_exists():
+            return
+        contagem = campo.count("1.0", "end", "displaylines")
+        if isinstance(contagem, tuple):
+            contagem = contagem[0]
+        linhas = max(1, contagem or 1)
+        if int(campo.cget("height")) != linhas:
+            campo.config(height=linhas)
+
+    campo.ajustar_altura = ajustar_altura
+    campo.bind("<Configure>", ajustar_altura)
+    # Um Text desabilitado não pega foco sozinho ao clicar, e sem foco o
+    # Ctrl+C não chega nele.
+    campo.bind("<Button-1>", lambda e: campo.focus_set(), add="+")
+    definir_texto_campo(campo, texto)
+    return campo
+
+
 def mostrar_metadata_capitulo(title, seg):
     """
-    Abre uma janela mostrando o metadata gerado pela IA pra esse
-    capítulo — título, probabilidade de virar corte, quote de destaque,
-    descrição, sugestão de imagem, texto de thumbnail — sem precisar
-    abrir JSON na mão. Se ainda não tiver metadata gerado, oferece
-    gerar na hora (mesma lógica do botão de thumbnail).
+    Abre a janela com o metadata gerado pela IA pra esse capítulo. Todo
+    campo é selecionável e tem um botão "Copiar"; "Copiar tudo" leva o
+    conjunto de uma vez.
 
-    A fala de destaque (quote_destaque + texto de thumbnail) tem um
-    botão "Regenerar" — pra quando ela sai genérica/sem graça — com um
-    checkbox "Mais bombástico" que pede uma versão ainda mais
-    forte/polêmica na regeneração. Os dois campos são regenerados JUNTOS
-    porque o texto_thumbnail é o que vai literalmente escrito na imagem
-    da thumbnail, e precisa continuar falando do MESMO momento que a
-    quote de destaque — senão os dois ficam fora de sincronia.
+    Título e texto de thumbnail vêm como LISTA de opções: a marcada é a
+    escolhida (é a que vai pra thumbnail e pro "Copiar tudo"), e "Gerar
+    mais 5" acrescenta opções novas sem apagar as que já estão ali.
+
+    A quote de destaque tem seu próprio "Regenerar". O texto de thumbnail
+    que a IA devolve junto com a quote nova (os dois saem do MESMO momento
+    da fala) entra como mais uma opção na lista, sem trocar a escolhida.
+
+    Nenhuma chamada à IA roda na thread principal: se o capítulo ainda
+    não tem metadata, a janela abre na hora com "Gerando…" e é preenchida
+    quando a resposta chega.
     """
-    dados_ia = obter_metadata_ia_do_capitulo(title, seg)
-    if not dados_ia:
-        messagebox.showinfo("Metadata", "Sem metadata disponível pra esse capítulo.")
-        return
+    COR_FUNDO = "#7F14B7"
+    COR_DESTAQUE = "#FEF500"
+    COR_AVISO = "#FFD400"
+
+    dados_existentes = metadata_ia.get(title)
+    texto_para_gerar = None
+    if not dados_existentes:
+        texto_para_gerar = _preparar_texto_para_metadata(title, seg)
+        if texto_para_gerar is None:
+            return
+
+    # Se o usuário trocar de projeto com essa janela aberta, nada do que
+    # for feito nela pode ser salvo por cima do projeto novo.
+    pasta_projeto_da_janela = PASTA_PROJETO_ATUAL
 
     janela = tk.Toplevel(tela)
     janela.title(f"Metadata — {title}")
-    janela.geometry("520x620")
-    janela.configure(bg="#7F14B7")
+    janela.geometry("660x720")
+    janela.minsize(480, 360)
+    janela.configure(bg=COR_FUNDO)
 
-    def adicionar_linha(rotulo, valor):
-        frame_linha = tk.Frame(janela, bg="#7F14B7")
-        frame_linha.pack(fill="x", padx=12, pady=5, anchor="w")
-        tk.Label(
-            frame_linha, text=rotulo, bg="#7F14B7", fg="#FEF500",
-            font=("Industry-Black", 9, "bold")
-        ).pack(anchor="w")
-        lbl_valor = tk.Label(
-            frame_linha, text=valor or "(vazio)", bg="#FFFFFF", fg="#000000",
-            wraplength=480, justify="left", anchor="w"
-        )
-        lbl_valor.pack(anchor="w", fill="x")
-        return lbl_valor
-
-    probabilidade = dados_ia.get("probabilidade_corte")
-    adicionar_linha("Título sugerido:", dados_ia.get("titulo"))
-    adicionar_linha(
-        "Probabilidade de virar corte:",
-        f"{probabilidade}%" if probabilidade is not None else None
+    barra = tk.Frame(janela, bg=COR_FUNDO)
+    barra.pack(fill="x", padx=12, pady=(10, 4))
+    btn_copiar_tudo = tk.Button(
+        barra, text="📋 Copiar tudo", state="disabled",
+        bg=COR_DESTAQUE, fg=COR_FUNDO, font=("Industry-Black", 9, "bold")
     )
+    btn_copiar_tudo.pack(side="left")
+    lbl_status = tk.Label(barra, text="", bg=COR_FUNDO, fg="#FFFFFF", font=("Industry-Black", 9))
+    lbl_status.pack(side="left", padx=10)
 
-    lbl_quote = adicionar_linha("Quote de destaque:", dados_ia.get("quote_destaque"))
-    lbl_aviso_quote = tk.Label(
-        janela, text="", bg="#7F14B7", fg="#FFD400", font=("Industry-Black", 8),
-        wraplength=480, justify="left"
-    )
-    lbl_aviso_quote.pack(fill="x", padx=12, pady=(0, 4), anchor="w")
+    # Área rolável — com as listas de opções a janela fica bem mais alta
+    # que antes. A rodinha é tratada por _rolar_com_mouse (bind_all).
+    area = tk.Frame(janela, bg=COR_FUNDO)
+    area.pack(fill="both", expand=True)
+    canvas = tk.Canvas(area, bg=COR_FUNDO, highlightthickness=0)
+    barra_rolagem = tk.Scrollbar(area, orient="vertical", command=canvas.yview)
+    corpo = tk.Frame(canvas, bg=COR_FUNDO)
+    corpo.bind("<Configure>", lambda e: canvas.configure(scrollregion=canvas.bbox("all")))
+    id_corpo = canvas.create_window((0, 0), window=corpo, anchor="nw")
+    canvas.bind("<Configure>", lambda e: canvas.itemconfig(id_corpo, width=e.width))
+    canvas.configure(yscrollcommand=barra_rolagem.set)
+    canvas.pack(side="left", fill="both", expand=True)
+    barra_rolagem.pack(side="right", fill="y")
 
-    texto_thumb_inicial = dados_ia.get("texto_thumbnail") or {}
-    lbl_thumb1 = adicionar_linha("Texto de thumbnail (linha 1):", texto_thumb_inicial.get("linha1"))
-    lbl_thumb2 = adicionar_linha("Texto de thumbnail (linha 2):", texto_thumb_inicial.get("linha2"))
-    lbl_aviso_thumb = tk.Label(
-        janela, text="", bg="#7F14B7", fg="#FFD400", font=("Industry-Black", 8),
-        wraplength=480, justify="left"
-    )
-    lbl_aviso_thumb.pack(fill="x", padx=12, pady=(0, 4), anchor="w")
+    def _montar_conteudo(dados_ia):
+        # ---- Listas de opções (com compatibilidade pra metadata antigo,
+        # salvo antes das opções existirem: vira uma lista de uma opção) ----
+        opcoes_titulo = dados_ia.get("opcoes_titulo")
+        if not isinstance(opcoes_titulo, list):
+            opcoes_titulo = []
+        if dados_ia.get("titulo") and dados_ia["titulo"] not in opcoes_titulo:
+            opcoes_titulo.insert(0, dados_ia["titulo"])
+        dados_ia["opcoes_titulo"] = opcoes_titulo
 
-    def _atualizar_avisos_confianca():
-        # A validação (verificar_quote) já rodava desde antes dessa
-        # sessão, mas o resultado só ia pro JSON/console — nunca
-        # aparecia pra quem usa o app. Sem isso, uma quote inventada ou
-        # muito parafraseada passa batido até alguém abrir o JSON na
-        # mão. None (sem "aviso") quando a maior parte das palavras
-        # bate em ordem com a transcrição original.
-        lbl_aviso_quote.config(
-            text=_texto_aviso_confianca(dados_ia.get("quote_fracao_sequencial")) or ""
-        )
-        lbl_aviso_thumb.config(
-            text=_texto_aviso_confianca(dados_ia.get("texto_thumbnail_fracao_sequencial")) or ""
-        )
+        def _linhas_thumb(opcao):
+            return (opcao.get("linha1") or "", opcao.get("linha2") or "")
 
-    _atualizar_avisos_confianca()
+        opcoes_thumb = dados_ia.get("opcoes_texto_thumbnail")
+        if not isinstance(opcoes_thumb, list):
+            opcoes_thumb = []
+        thumb_escolhido = dados_ia.get("texto_thumbnail")
+        if not isinstance(thumb_escolhido, dict):
+            thumb_escolhido = {}
+        if any(_linhas_thumb(thumb_escolhido)) and not any(
+            _linhas_thumb(o) == _linhas_thumb(thumb_escolhido) for o in opcoes_thumb
+        ):
+            opcoes_thumb.insert(0, {
+                "linha1": thumb_escolhido.get("linha1") or "",
+                "linha2": thumb_escolhido.get("linha2") or "",
+                "fracao_sequencial": dados_ia.get("texto_thumbnail_fracao_sequencial"),
+            })
+        dados_ia["opcoes_texto_thumbnail"] = opcoes_thumb
 
-    frame_regen = tk.Frame(janela, bg="#7F14B7")
-    frame_regen.pack(fill="x", padx=12, pady=(0, 8), anchor="w")
+        def _salvar():
+            if PASTA_PROJETO_ATUAL != pasta_projeto_da_janela:
+                return
+            metadata_ia[title] = dados_ia
+            salvar_estado_projeto()
 
-    var_bombastico = tk.BooleanVar(value=False)
-    tk.Checkbutton(
-        frame_regen, text="Mais bombástico", variable=var_bombastico,
-        bg="#7F14B7", fg="#FFFFFF", selectcolor="#7F14B7",
-        activebackground="#7F14B7", activeforeground="#FFFFFF",
-        font=("Industry-Black", 8)
-    ).pack(side="left")
+        # ---- Chamadas à IA: sempre em thread, um pedido por vez ----
+        botoes_ia = []
 
-    lbl_status_regen = tk.Label(
-        frame_regen, text="", bg="#7F14B7", fg="#FFFFFF", font=("Industry-Black", 8)
-    )
-    lbl_status_regen.pack(side="left", padx=8)
+        def _definir_ocupado(mensagem):
+            for botao in botoes_ia:
+                botao.config(state="disabled" if mensagem else "normal")
+            lbl_status.config(text=mensagem or "")
 
-    def _regenerar_fala_destaque():
-        texto_capitulo = _extrair_texto_capitulo_atual(seg)
-        if texto_capitulo is None:
-            return  # _extrair_texto_capitulo_atual já mostrou o aviso
+        def _erro_ia(erro):
+            messagebox.showerror(
+                "Erro na IA",
+                f"A IA não devolveu uma resposta que desse pra usar:\n\n{erro or 'resposta vazia'}\n\n"
+                "Confere se a GEMINI_API_KEY no .env está certa.",
+                parent=janela
+            )
 
-        btn_regen_fala.config(state="disabled")
-        lbl_status_regen.config(text="Gerando de novo...")
-        bombastico = var_bombastico.get()
+        def _rodar_ia(mensagem, chamada, ao_concluir):
+            """
+            chamada(texto_do_capitulo) roda na thread e devolve o
+            resultado; ao_concluir(resultado, erro, texto_do_capitulo)
+            roda de volta na thread principal.
+            """
+            texto_capitulo = _preparar_texto_para_metadata(title, seg, perguntar=False)
+            janela.lift()
+            if texto_capitulo is None:
+                return
 
-        def _worker():
-            resultado = None
-            erro = None
-            try:
-                resultado = regenerar_fala_destaque(
+            _definir_ocupado(mensagem)
+
+            def _worker():
+                resultado = None
+                erro = None
+                try:
+                    resultado = chamada(texto_capitulo)
+                except Exception as e:
+                    erro = str(e)
+
+                def _fim():
+                    if not janela.winfo_exists():
+                        return
+                    _definir_ocupado(None)
+                    ao_concluir(resultado, erro, texto_capitulo)
+
+                tela.after(0, _fim)
+
+            threading.Thread(target=_worker, daemon=True).start()
+
+        # ---- Peças de layout ----
+        def _secao(rotulo):
+            frame = tk.Frame(corpo, bg=COR_FUNDO)
+            frame.pack(fill="x", padx=12, pady=(10, 0))
+            cabecalho = tk.Frame(frame, bg=COR_FUNDO)
+            cabecalho.pack(fill="x", pady=(0, 2))
+            tk.Label(
+                cabecalho, text=rotulo, bg=COR_FUNDO, fg=COR_DESTAQUE,
+                font=("Industry-Black", 9, "bold")
+            ).pack(side="left")
+            return frame, cabecalho
+
+        def _botao_copiar(pai, obter_texto):
+            botao = tk.Button(pai, text="Copiar", bg="#FFFFFF", fg=COR_FUNDO, font=("Industry-Black", 8, "bold"))
+            botao.config(command=lambda: copiar_para_clipboard(obter_texto(), botao))
+            return botao
+
+        def _botao_ia(pai, texto, comando):
+            botao = tk.Button(
+                pai, text=texto, command=comando,
+                bg="#FFFFFF", fg=COR_FUNDO, font=("Industry-Black", 8, "bold")
+            )
+            botoes_ia.append(botao)
+            return botao
+
+        def _check_bombastico(pai):
+            return tk.Checkbutton(
+                pai, text="Mais bombástico", variable=var_bombastico,
+                bg=COR_FUNDO, fg="#FFFFFF", selectcolor=COR_FUNDO,
+                activebackground=COR_FUNDO, activeforeground="#FFFFFF",
+                font=("Industry-Black", 8)
+            )
+
+        def _linha_campo(pai, texto, obter_texto):
+            """Campo selecionável + botão Copiar (o botão copia o valor ATUAL, via obter_texto)."""
+            linha = tk.Frame(pai, bg=COR_FUNDO)
+            linha.pack(fill="x", pady=1)
+            _botao_copiar(linha, obter_texto).pack(side="right", padx=(4, 0), anchor="n")
+            campo = criar_campo_selecionavel(linha, texto)
+            campo.pack(side="left", fill="x", expand=True)
+            return campo
+
+        def _linha_opcao(pai, texto, variavel, indice, ao_escolher, aviso=None):
+            """Uma opção de uma lista: marcador de escolhida + campo selecionável + Copiar."""
+            linha = tk.Frame(pai, bg=COR_FUNDO)
+            linha.pack(fill="x", pady=1)
+            tk.Radiobutton(
+                linha, variable=variavel, value=indice, command=ao_escolher,
+                bg=COR_FUNDO, activebackground=COR_FUNDO, selectcolor="#FFFFFF",
+                highlightthickness=0
+            ).pack(side="left", anchor="n")
+            _botao_copiar(linha, lambda: texto).pack(side="right", padx=(4, 0), anchor="n")
+            if aviso:
+                tk.Label(
+                    linha, text=aviso, bg=COR_FUNDO, fg=COR_AVISO, font=("Industry-Black", 8, "bold")
+                ).pack(side="right", padx=(4, 0), anchor="n")
+            criar_campo_selecionavel(linha, texto).pack(side="left", fill="x", expand=True)
+
+        def _limpar(frame):
+            for widget in frame.winfo_children():
+                widget.destroy()
+
+        var_bombastico = tk.BooleanVar(value=False)
+
+        # ---- Título ----
+        var_titulo = tk.IntVar(value=0)
+
+        def _escolher_titulo():
+            dados_ia["titulo"] = opcoes_titulo[var_titulo.get()]
+            _salvar()
+
+        def _montar_titulos():
+            _limpar(frame_titulos)
+            if not opcoes_titulo:
+                tk.Label(
+                    frame_titulos, text="Sem título sugerido — clique em \"Gerar mais 5\".",
+                    bg=COR_FUNDO, fg="#FFFFFF", font=("Industry-Black", 8)
+                ).pack(anchor="w")
+                return
+            escolhido = dados_ia.get("titulo")
+            var_titulo.set(opcoes_titulo.index(escolhido) if escolhido in opcoes_titulo else 0)
+            for i, titulo in enumerate(opcoes_titulo):
+                _linha_opcao(frame_titulos, titulo, var_titulo, i, _escolher_titulo)
+
+        def _gerar_mais_titulos():
+            def chamada(texto_capitulo):
+                try:
+                    exemplos = selecionar_exemplos_few_shot(
+                        carregar_json(CAMINHO_TREINO_IA), programa=PROGRAMA_PROJETO_ATUAL
+                    )
+                except Exception:
+                    exemplos = None  # sem arquivo de treino: gera sem a referência de estilo
+                return gerar_mais_titulos(
+                    {"texto": texto_capitulo, "programa": PROGRAMA_PROJETO_ATUAL},
+                    list(opcoes_titulo), exemplos=exemplos
+                )
+
+            def ao_concluir(novos, erro, _texto_capitulo):
+                if novos is None:
+                    _erro_ia(erro)
+                    return
+                if not novos:
+                    messagebox.showinfo(
+                        "Gerar mais", "A IA só repetiu títulos que já estavam na lista — tenta de novo.",
+                        parent=janela
+                    )
+                    return
+                opcoes_titulo.extend(novos)
+                _salvar()
+                _montar_titulos()
+
+            _rodar_ia("Gerando mais títulos…", chamada, ao_concluir)
+
+        secao_titulo, cab_titulo = _secao("Título — marque o escolhido:")
+        _botao_ia(cab_titulo, "➕ Gerar mais 5", _gerar_mais_titulos).pack(side="right")
+        frame_titulos = tk.Frame(secao_titulo, bg=COR_FUNDO)
+        frame_titulos.pack(fill="x")
+        _montar_titulos()
+
+        probabilidade = dados_ia.get("probabilidade_corte")
+        if probabilidade is not None:
+            tk.Label(
+                secao_titulo, text=f"Probabilidade de virar corte: {probabilidade}%",
+                bg=COR_FUNDO, fg="#FFFFFF", font=("Industry-Black", 8)
+            ).pack(anchor="w", pady=(4, 0))
+
+        # ---- Quote de destaque ----
+        def _atualizar_aviso_quote():
+            aviso = _texto_aviso_confianca(dados_ia.get("quote_fracao_sequencial"))
+            lbl_aviso_quote.config(text=aviso or "")
+            # Sem aviso, o label some — vazio ele ainda ocuparia uma linha.
+            if aviso:
+                lbl_aviso_quote.pack(fill="x", anchor="w")
+            else:
+                lbl_aviso_quote.pack_forget()
+
+        def _regenerar_quote():
+            bombastico = var_bombastico.get()
+
+            def chamada(texto_capitulo):
+                return regenerar_fala_destaque(
                     {"texto": texto_capitulo},
                     titulo_atual=dados_ia.get("titulo"),
                     bombastico=bombastico,
                 )
-            except Exception as e:
-                erro = str(e)
 
-            def _concluir():
-                btn_regen_fala.config(state="normal")
-                lbl_status_regen.config(text="")
-                if resultado and resultado.get("quote_destaque") and resultado.get("texto_thumbnail"):
-                    dados_ia["quote_destaque"] = resultado["quote_destaque"]
-                    dados_ia["quote_encontrada_exata"] = resultado.get("quote_encontrada_exata")
-                    dados_ia["quote_fracao_sequencial"] = resultado.get("quote_fracao_sequencial")
-                    dados_ia["texto_thumbnail"] = resultado["texto_thumbnail"]
-                    dados_ia["texto_thumbnail_fracao_sequencial"] = resultado.get("texto_thumbnail_fracao_sequencial")
-                    metadata_ia[title] = dados_ia
-                    salvar_estado_projeto()
-                    lbl_quote.config(text=dados_ia["quote_destaque"])
-                    lbl_thumb1.config(text=dados_ia["texto_thumbnail"].get("linha1") or "(vazio)")
-                    lbl_thumb2.config(text=dados_ia["texto_thumbnail"].get("linha2") or "(vazio)")
-                    _atualizar_avisos_confianca()
-                else:
-                    messagebox.showerror(
-                        "Erro na IA",
-                        f"Não consegui gerar uma nova fala de destaque:\n\n{erro or 'resposta vazia'}\n\n"
-                        "Confere se a GEMINI_API_KEY no .env está certa."
-                    )
-            tela.after(0, _concluir)
+            def ao_concluir(resultado, erro, texto_capitulo):
+                if not resultado or not resultado.get("quote_destaque"):
+                    _erro_ia(erro)
+                    return
+                dados_ia["quote_destaque"] = resultado["quote_destaque"]
+                dados_ia["quote_encontrada_exata"] = resultado.get("quote_encontrada_exata")
+                dados_ia["quote_fracao_sequencial"] = resultado.get("quote_fracao_sequencial")
 
-        threading.Thread(target=_worker, daemon=True).start()
+                # O texto de thumbnail que veio junto é do MESMO momento
+                # da quote nova — entra como mais uma opção, sem trocar a
+                # que está escolhida.
+                novos_thumb = normalizar_opcoes_texto_thumbnail(
+                    [resultado.get("texto_thumbnail")], texto_capitulo, ja_sugeridos=opcoes_thumb
+                )
+                opcoes_thumb.extend(novos_thumb)
 
-    btn_regen_fala = tk.Button(
-        frame_regen, text="🔄 Regenerar fala de destaque (quote + thumb)", command=_regenerar_fala_destaque,
-        bg="#FFFFFF", fg="#7F14B7", font=("Industry-Black", 8, "bold")
-    )
-    btn_regen_fala.pack(side="left")
+                _salvar()
+                definir_texto_campo(campo_quote, dados_ia["quote_destaque"])
+                _atualizar_aviso_quote()
+                if novos_thumb:
+                    _montar_thumbs()
 
-    adicionar_linha("Descrição:", dados_ia.get("descricao"))
-    adicionar_linha("Sugestão de imagem:", dados_ia.get("sugestao_imagem"))
+            _rodar_ia("Gerando outra quote…", chamada, ao_concluir)
 
-    if not texto_thumb_inicial:
-        lbl_thumb1.config(
-            text="Não disponível — esse metadata é de antes desse campo existir, "
-            "ou veio de um JSON antigo. Gera de novo (ou clica Regenerar acima) pra ter esse campo."
+        secao_quote, cab_quote = _secao("Quote de destaque:")
+        _botao_ia(cab_quote, "🔄 Regenerar quote", _regenerar_quote).pack(side="right")
+        _check_bombastico(cab_quote).pack(side="right", padx=6)
+        campo_quote = _linha_campo(
+            secao_quote, dados_ia.get("quote_destaque"), lambda: dados_ia.get("quote_destaque")
         )
+        lbl_aviso_quote = tk.Label(
+            secao_quote, text="", bg=COR_FUNDO, fg=COR_AVISO, font=("Industry-Black", 8),
+            wraplength=600, justify="left", anchor="w"
+        )
+        _atualizar_aviso_quote()
+
+        # ---- Texto de thumbnail ----
+        var_thumb = tk.IntVar(value=0)
+
+        def _escolher_thumb():
+            opcao = opcoes_thumb[var_thumb.get()]
+            dados_ia["texto_thumbnail"] = {"linha1": opcao.get("linha1") or "", "linha2": opcao.get("linha2") or ""}
+            dados_ia["texto_thumbnail_fracao_sequencial"] = opcao.get("fracao_sequencial")
+            _salvar()
+
+        def _montar_thumbs():
+            _limpar(frame_thumbs)
+            if not opcoes_thumb:
+                tk.Label(
+                    frame_thumbs,
+                    text="Sem texto de thumbnail salvo (metadata de antes desse campo existir) — "
+                         "clique em \"Gerar mais 5\".",
+                    bg=COR_FUNDO, fg="#FFFFFF", font=("Industry-Black", 8), wraplength=600, justify="left"
+                ).pack(anchor="w")
+                return
+
+            escolhido = _linhas_thumb(dados_ia.get("texto_thumbnail") or {})
+            indices = [i for i, o in enumerate(opcoes_thumb) if _linhas_thumb(o) == escolhido]
+            var_thumb.set(indices[0] if indices else 0)
+
+            tem_aviso = False
+            for i, opcao in enumerate(opcoes_thumb):
+                fracao = opcao.get("fracao_sequencial")
+                aviso = None
+                if fracao is not None and fracao < 0.85:
+                    aviso = f"⚠️ {round(fracao * 100)}%"
+                    tem_aviso = True
+                _linha_opcao(
+                    frame_thumbs, "\n".join(_linhas_thumb(opcao)), var_thumb, i, _escolher_thumb, aviso=aviso
+                )
+
+            if tem_aviso:
+                tk.Label(
+                    frame_thumbs,
+                    text="⚠️ = só essa parte das palavras bate, em ordem, com a transcrição — "
+                         "o texto pode ter sido reformulado ou inventado pela IA.",
+                    bg=COR_FUNDO, fg=COR_AVISO, font=("Industry-Black", 8), wraplength=600, justify="left"
+                ).pack(anchor="w", pady=(2, 0))
+
+        def _gerar_mais_thumbs():
+            bombastico = var_bombastico.get()
+
+            def chamada(texto_capitulo):
+                return gerar_mais_textos_thumbnail(
+                    {"texto": texto_capitulo}, list(opcoes_thumb),
+                    titulo_atual=dados_ia.get("titulo"), bombastico=bombastico
+                )
+
+            def ao_concluir(novos, erro, _texto_capitulo):
+                if novos is None:
+                    _erro_ia(erro)
+                    return
+                if not novos:
+                    messagebox.showinfo(
+                        "Gerar mais", "A IA só repetiu textos que já estavam na lista — tenta de novo.",
+                        parent=janela
+                    )
+                    return
+                sem_escolhido = not any(_linhas_thumb(dados_ia.get("texto_thumbnail") or {}))
+                opcoes_thumb.extend(novos)
+                if sem_escolhido:
+                    # Metadata antigo, sem texto de thumbnail: a primeira
+                    # opção nova já fica como a escolhida.
+                    var_thumb.set(0)
+                    _escolher_thumb()
+                else:
+                    _salvar()
+                _montar_thumbs()
+
+            _rodar_ia("Gerando mais textos de thumbnail…", chamada, ao_concluir)
+
+        secao_thumb, cab_thumb = _secao("Texto de thumbnail — marque o que vai na thumb:")
+        _botao_ia(cab_thumb, "➕ Gerar mais 5", _gerar_mais_thumbs).pack(side="right")
+        _check_bombastico(cab_thumb).pack(side="right", padx=6)
+        frame_thumbs = tk.Frame(secao_thumb, bg=COR_FUNDO)
+        frame_thumbs.pack(fill="x")
+        _montar_thumbs()
+
+        # ---- Descrição e sugestão de imagem ----
+        secao_descricao, _ = _secao("Descrição:")
+        _linha_campo(secao_descricao, dados_ia.get("descricao"), lambda: dados_ia.get("descricao"))
+
+        secao_imagem, _ = _secao("Sugestão de imagem:")
+        _linha_campo(secao_imagem, dados_ia.get("sugestao_imagem"), lambda: dados_ia.get("sugestao_imagem"))
+
+        tk.Frame(corpo, bg=COR_FUNDO, height=12).pack()
+
+        # ---- Copiar tudo ----
+        def _copiar_tudo():
+            linha1, linha2 = _linhas_thumb(dados_ia.get("texto_thumbnail") or {})
+            partes = [
+                ("TÍTULO", dados_ia.get("titulo")),
+                ("DESCRIÇÃO", dados_ia.get("descricao")),
+                ("QUOTE DE DESTAQUE", dados_ia.get("quote_destaque")),
+                ("TEXTO DA THUMBNAIL", "\n".join(p for p in (linha1, linha2) if p)),
+                ("SUGESTÃO DE IMAGEM", dados_ia.get("sugestao_imagem")),
+            ]
+            bloco = "\n\n".join(f"{rotulo}:\n{valor}" for rotulo, valor in partes if valor)
+            copiar_para_clipboard(bloco, btn_copiar_tudo, "📋 Copiar tudo")
+
+        btn_copiar_tudo.config(state="normal", command=_copiar_tudo)
+
+    if dados_existentes:
+        _montar_conteudo(dados_existentes)
+        return
+
+    # Ainda não tem metadata: gera numa thread e preenche a janela quando
+    # a resposta chegar — antes essa chamada travava o programa inteiro.
+    lbl_status.config(text="Gerando sugestão com a IA…")
+
+    def _worker():
+        dados_novos = None
+        erro = None
+        try:
+            dados_novos = _gerar_metadata_ia(texto_para_gerar)
+        except Exception as e:
+            erro = str(e)
+
+        def _concluir():
+            trocou_de_projeto = PASTA_PROJETO_ATUAL != pasta_projeto_da_janela
+            if dados_novos and not trocou_de_projeto:
+                metadata_ia[title] = dados_novos
+                salvar_estado_projeto()
+                if janela.winfo_exists():
+                    lbl_status.config(text="")
+                    _montar_conteudo(dados_novos)
+                return
+
+            if janela.winfo_exists():
+                janela.destroy()
+            if not trocou_de_projeto:
+                messagebox.showerror(
+                    "Erro na IA",
+                    f"Não consegui gerar a sugestão de texto:\n\n{erro or 'resposta vazia'}\n\n"
+                    "Confere se a GEMINI_API_KEY no .env está certa."
+                )
+
+        tela.after(0, _concluir)
+
+    threading.Thread(target=_worker, daemon=True).start()
 
 
 def obter_duracao_video(path):

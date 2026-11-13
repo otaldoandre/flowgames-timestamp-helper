@@ -179,9 +179,9 @@ pode ser uma frase inteira; o texto_thumbnail precisa ser bem mais
 curto — só cabe 3-5 palavras por linha, em 2 linhas, no template real
 do canal. Use palavras REAIS ditas pelo host nesse trecho (pode cortar
 uma frase maior, não precisa ser gramaticalmente completo), nunca
-invente. São {N_OPCOES} opções pro editor escolher: cada uma de um momento ou
-recorte DIFERENTE do trecho (não a mesma frase com uma palavra
-trocada), a mais forte primeiro.
+invente. Escreva em MAIÚSCULAS. São {N_OPCOES} opções pro editor escolher: cada
+uma de um momento ou recorte DIFERENTE do trecho (não a mesma frase com
+uma palavra trocada), a mais forte primeiro.
 
 Não existe resposta "certa" binária aqui — vários fatores fora do
 conteúdo em si (tempo de edição disponível no dia, se um assunto
@@ -659,9 +659,11 @@ que vai escrito na imagem da thumbnail do corte abaixo.
 {bloco_titulo}
 Escreva {N_OPCOES} opções NOVAS, cada uma de um momento ou recorte DIFERENTE do
 trecho. Só cabe 3-5 palavras por linha, em 2 linhas, no template real do
-canal. Copie as palavras LITERALMENTE do texto abaixo (pode cortar o
-começo/fim de uma frase maior, não precisa ser gramaticalmente completo)
-— NUNCA parafraseie nem invente palavras que o host não disse.
+canal — NUNCA passe de 5 palavras numa linha; se a fala for maior, corte.
+Escreva em MAIÚSCULAS. Copie as palavras LITERALMENTE do texto abaixo
+(pode cortar o começo/fim de uma frase maior, não precisa ser
+gramaticalmente completo) — NUNCA parafraseie nem invente palavras que o
+host não disse.
 {bloco_ja_sugeridos}
 Responda SOMENTE em JSON puro (sem markdown, sem ```), no formato exato:
 {{

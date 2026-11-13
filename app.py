@@ -33,7 +33,6 @@ def obter_pasta_base():
 
 
 PASTA_BASE = obter_pasta_base()
-print(f"[DIAGNOSTICO 1/8] Pasta base resolvida: {PASTA_BASE}", flush=True)
 
 # Pasta bin/ com ffmpeg.exe, ffprobe.exe e yt-dlp.exe empacotados junto
 # do programa — colocada NO INÍCIO do PATH (não no fim), pra ter
@@ -43,22 +42,18 @@ print(f"[DIAGNOSTICO 1/8] Pasta base resolvida: {PASTA_BASE}", flush=True)
 PASTA_BIN = os.path.join(PASTA_BASE, "bin")
 if os.path.isdir(PASTA_BIN):
     os.environ["PATH"] = PASTA_BIN + os.pathsep + os.environ.get("PATH", "")
-print(f"[DIAGNOSTICO 2/8] Pasta bin/ existe? {os.path.isdir(PASTA_BIN)}", flush=True)
 
 from dotenv import load_dotenv
 caminho_env = os.path.join(PASTA_BASE, ".env")
 load_dotenv(caminho_env)
-print(f"[DIAGNOSTICO 3/8] .env carregado (existe? {os.path.exists(caminho_env)})", flush=True)
 
 # Restringe o acesso a e-mails @flowgames.gg — checa ANTES de montar
 # qualquer coisa da interface. Se negar (domínio errado ou login
 # cancelado), fecha o programa aqui mesmo.
 from auth_google import autenticar_usuario
-print("[DIAGNOSTICO 4/8] Vou tentar autenticar agora — se travar aqui, é o login", flush=True)
 
 try:
     _email_autenticado = autenticar_usuario()
-    print(f"[DIAGNOSTICO 5/8] Login OK: {_email_autenticado}", flush=True)
 except Exception as _erro_login:
     _tela_erro_login = tk.Tk()
     _tela_erro_login.withdraw()
@@ -81,12 +76,12 @@ if not _email_autenticado:
     _tela_login.destroy()
     sys.exit(1)
 
-print("[DIAGNOSTICO 6/8] Login passou — importando módulos pesados (rembg, IA, Photoshop)...", flush=True)
+# Os módulos pesados (rembg/OpenCV/Photoshop em pipeline_thumbnail, e o
+# cliente do Gemini dentro de gerar_metadata_capitulo) são importados só
+# na hora do uso, pra janela abrir rápido.
 from detectar_capitulos import detectar_capitulos, carregar_transcricao as carregar_transcricao_ia
 from gerar_metadata_capitulo import carregar_json, selecionar_exemplos_few_shot, avaliar_capitulo, regenerar_fala_destaque
-from pipeline_thumbnail import montar_thumbnail_completa
 from PIL import Image, ImageTk
-print("[DIAGNOSTICO 7/8] Módulos pesados importados com sucesso", flush=True)
 
 # Caminhos específicos da máquina — vêm do .env, não hardcoded, porque
 # são diferentes em qualquer PC que não seja o meu (inclusive o do
@@ -3157,6 +3152,12 @@ def _gerar_thumbnail_worker(title, caminho_frame_bruto, caminho_imagem_sugerida,
 
     for tentativa in range(1, MAX_TENTATIVAS + 1):
         try:
+            # Importado aqui, e não no topo do arquivo: puxa rembg,
+            # OpenCV e a ponte com o Photoshop, que demoram pra carregar
+            # e atrasavam a abertura do programa toda vez — agora só a
+            # primeira thumbnail da sessão paga esse tempo.
+            from pipeline_thumbnail import montar_thumbnail_completa
+
             resultado_thumb = montar_thumbnail_completa(
                 CAMINHO_TEMPLATE_THUMBNAIL,
                 caminho_frame_bruto,
@@ -3467,9 +3468,7 @@ def gerar_capitulos_automaticamente():
 
 
 # Configuração da interface
-print("[DIAGNOSTICO 8/8] Chegou até aqui — criando a janela do Tkinter agora...", flush=True)
 tela = tk.Tk()
-print(font.families())
 tela.title("Crie cortes com base nas timestamps!")
 tela.geometry("900x800")
 tela.configure(bg="#7F14B7")
@@ -4014,7 +4013,6 @@ tela.protocol("WM_DELETE_WINDOW", confirmar_fechar_programa)
 # Mostra a janela de seleção de projeto ANTES da principal — feito aqui
 # no final porque depende de widgets (frame_capitulos, txt_saida, etc.)
 # que só existem depois de toda a interface principal já montada
-print("[DIAGNOSTICO FINAL] Interface toda montada — abrindo seleção de projeto...", flush=True)
 abrir_janela_selecao_projeto(bloquear=True)
 
 # Inicia a interface

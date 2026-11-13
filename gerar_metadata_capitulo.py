@@ -15,8 +15,6 @@ import json
 import random
 import time
 
-from google import genai
-
 MODEL_NAME     = "gemini-3.5-flash-lite"  # mesmo modelo usado no notebook
 
 N_EXEMPLOS_POSITIVOS = 4
@@ -326,6 +324,11 @@ def chamar_gemini(prompt, api_key=None, model_name=MODEL_NAME, max_tentativas=MA
     api_key = api_key or os.environ.get("GEMINI_API_KEY")
     if not api_key:
         raise RuntimeError("GEMINI_API_KEY não encontrada. Defina a variável de ambiente antes de rodar.")
+
+    # Importado aqui, e não no topo do arquivo: o cliente do Gemini
+    # demora pra carregar e atrasava a abertura do app.py, que importa
+    # este módulo logo no início — agora só a primeira chamada paga isso.
+    from google import genai
 
     client = genai.Client(api_key=api_key)
 

@@ -485,6 +485,21 @@ capitulos_vars = {}
 # thumbnail) indexados por título de capítulo para referência futura
 metadata_ia = {}
 
+# Trechos a REMOVER de dentro de cada capítulo (ex: um ad no meio do
+# assunto), indexados pelo título do capítulo: {título: [[início, fim], ...]},
+# em segundos da live. O corte desse capítulo sai com esses pedaços
+# tirados e o resto emendado (ver calcular_trechos_mantidos e
+# montar_grafo_juncao). Salvo junto com o projeto.
+trechos_removidos = {}
+
+# Duração do cross dissolve (vídeo) + crossfade (áudio) em cada emenda,
+# quando "Transição nas emendas" está marcado.
+TRANSICAO_EMENDA_SEGUNDOS = 0.4
+
+# Um pedaço que sobraria entre dois trechos removidos (ou entre um trecho
+# removido e a borda do capítulo) com menos que isso é descartado junto.
+DURACAO_MINIMA_TRECHO_MANTIDO = 1.0
+
 # Guarda a transcrição selecionada uma vez, pra não pedir de novo a
 # cada capítulo — só reseta fechando e abrindo o programa (ou trocando
 # na função reset se você adicionar isso depois)
@@ -624,6 +639,7 @@ def salvar_estado_projeto():
         "video_path": video_path_var.get(),
         "caminho_transcricao": caminho_transcricao_atual or "",
         "metadata_ia": metadata_ia,
+        "trechos_removidos": trechos_removidos,
         "programa": PROGRAMA_PROJETO_ATUAL,
     }
 
@@ -921,6 +937,7 @@ def criar_novo_projeto():
         widget.destroy()
     capitulos_vars.clear()
     metadata_ia.clear()
+    trechos_removidos.clear()
     video_path_var.set("")
     caminho_transcricao_var.set("Nenhuma transcrição selecionada")
     caminho_transcricao_atual = None
@@ -961,6 +978,7 @@ def abrir_projeto_selecionado():
     combo_projetos.set(nome_selecionado)
 
     metadata_ia.clear()
+    trechos_removidos.clear()
     for widget in frame_capitulos.winfo_children():
         widget.destroy()
     capitulos_vars.clear()
@@ -990,6 +1008,7 @@ def abrir_projeto_selecionado():
         txt_entrada.insert("1.0", estado.get("texto_timestamps", "").strip())
 
         metadata_ia.update(estado.get("metadata_ia", {}))
+        trechos_removidos.update(normalizar_trechos_removidos(estado.get("trechos_removidos")))
 
         video_path_salvo = estado.get("video_path", "")
         if video_path_salvo:
@@ -1755,6 +1774,114 @@ def get_video_source():
     return path
 
 
+def normalizar_trechos_removidos(valor):
+    """
+    Limpa o que veio do arquivo do projeto pra trechos_removidos: devolve
+    {título do capítulo: [[início, fim], ...]} só com intervalos válidos
+    (dois números, fim depois do início), ordenados. Qualquer coisa fora
+    desse formato é ignorada em vez de quebrar a abertura do projeto.
+    """
+    if not isinstance(valor, dict):
+        return {}
+
+    limpo = {}
+    for titulo, intervalos in valor.items():
+        if not isinstance(titulo, str) or not isinstance(intervalos, list):
+            continue
+        validos = []
+        for intervalo in intervalos:
+            if not isinstance(intervalo, (list, tuple)) or len(intervalo) != 2:
+                continue
+            inicio, fim = intervalo
+            if isinstance(inicio, bool) or isinstance(fim, bool):
+                continue
+            if not isinstance(inicio, (int, float)) or not isinstance(fim, (int, float)):
+                continue
+            if fim > inicio >= 0:
+                validos.append([float(inicio), float(fim)])
+        if validos:
+            limpo[titulo] = sorted(validos)
+    return limpo
+
+
+def calcular_trechos_mantidos(inicio, fim, remover, duracao_minima=DURACAO_MINIMA_TRECHO_MANTIDO):
+    """
+    Dado um capítulo que vai de `inicio` a `fim` (segundos da live) e a
+    lista de intervalos a REMOVER de dentro dele, devolve a lista de
+    intervalos (início, fim) que SOBRAM, em ordem.
+
+    Intervalos a remover que passam das bordas do capítulo são aparados;
+    os que ficam totalmente fora são ignorados; os que se sobrepõem são
+    tratados como um só. Um pedaço que sobraria com menos de
+    `duracao_minima` segundos (ex: meio segundo entre dois ads) é
+    descartado junto — curto demais pra fazer sentido no corte e pra
+    caber a transição.
+    """
+    aparados = sorted(
+        (max(inicio, min(a, b)), min(fim, max(a, b)))
+        for a, b in remover
+    )
+
+    mantidos = []
+    cursor = inicio
+    for a, b in aparados:
+        if b <= a:
+            continue  # ficou fora do capítulo
+        if a - cursor >= duracao_minima:
+            mantidos.append((cursor, a))
+        cursor = max(cursor, b)
+
+    if fim - cursor >= duracao_minima:
+        mantidos.append((cursor, fim))
+
+    return mantidos
+
+
+def montar_grafo_juncao(duracoes, transicao, fps):
+    """
+    Monta a parte do filter_complex do ffmpeg que junta N trechos (as
+    entradas 0..N-1 do comando) num vídeo só, [vj], e num áudio só, [aj].
+    Devolve (lista de filtros, duração total do resultado em segundos).
+
+    Com `transicao` > 0, cada emenda ganha um cross dissolve no vídeo
+    (xfade) e um crossfade no áudio (acrossfade) com essa duração — o
+    final de um trecho se mistura com o começo do próximo, então o
+    resultado fica `transicao` segundos mais curto por emenda. Com 0, é
+    corte seco (concat).
+
+    O xfade exige que os trechos tenham a mesma taxa de quadros e é
+    posicionado pelo tempo em que o trecho anterior acaba — por isso o
+    fps do vídeo entra aqui e as `duracoes` devem ser múltiplos exatos de
+    um quadro.
+    """
+    n = len(duracoes)
+
+    if transicao <= 0:
+        entradas = "".join(f"[{i}:v][{i}:a]" for i in range(n))
+        return [f"{entradas}concat=n={n}:v=1:a=1[vj][aj]"], sum(duracoes)
+
+    filtros = [f"[{i}:v]fps={fps:.5f},format=yuv420p[s{i}]" for i in range(n)]
+
+    video = "[s0]"
+    audio = "[0:a]"
+    acumulado = duracoes[0]
+    for i in range(1, n):
+        ultimo = i == n - 1
+        saida_video = "[vj]" if ultimo else f"[x{i}]"
+        saida_audio = "[aj]" if ultimo else f"[y{i}]"
+        # A transição começa `transicao` segundos antes do fim do que já
+        # foi juntado até aqui.
+        offset = acumulado - transicao
+        filtros.append(
+            f"{video}[s{i}]xfade=transition=fade:duration={transicao:.3f}:offset={offset:.3f}{saida_video}"
+        )
+        filtros.append(f"{audio}[{i}:a]acrossfade=d={transicao:.3f}{saida_audio}")
+        video, audio = saida_video, saida_audio
+        acumulado += duracoes[i] - transicao
+
+    return filtros, acumulado
+
+
 def generate_clips():
     # A função assume que o usuário informou o link do YouTube (baixa via yt-dlp)
     # ou selecionou o arquivo de live correto, onde todos timestamps contidos no arquivo
@@ -1774,6 +1901,7 @@ def generate_clips():
     ## Config ##
     enable_fade_in = fade_in_var.get()
     enable_fade_out = fade_out_var.get()
+    enable_transicao = transicao_emenda_var.get()
 
     enable_endslate = endslate_var.get()
     endslate_path = endslate_path_var.get()
@@ -1819,17 +1947,23 @@ def generate_clips():
             return
         pular_existentes = (escolha == "pular")
 
+    # Trechos removidos de cada capítulo: copiados aqui, na thread
+    # principal, pra o worker não ler o dicionário global enquanto ele
+    # pode estar sendo editado.
+    for seg in segments:
+        seg["remover"] = [tuple(trecho) for trecho in trechos_removidos.get(seg["title"], [])]
+
     widgets_progresso = abrir_janela_progresso("Gerando cortes", len(segments))
 
     thread = threading.Thread(
         target=_gerar_cortes_worker,
-        args=(path, segments, enable_fade_in, enable_fade_out, enable_endslate, endslate_path, enable_logo, logo_path, widgets_progresso, pasta_destino, pular_existentes),
+        args=(path, segments, enable_fade_in, enable_fade_out, enable_endslate, endslate_path, enable_logo, logo_path, widgets_progresso, pasta_destino, pular_existentes, enable_transicao),
         daemon=True,
     )
     thread.start()
 
 
-def _gerar_cortes_worker(path, segments, enable_fade_in, enable_fade_out, enable_endslate, endslate_path, enable_logo, logo_path, widgets_progresso, pasta_destino, pular_existentes):
+def _gerar_cortes_worker(path, segments, enable_fade_in, enable_fade_out, enable_endslate, endslate_path, enable_logo, logo_path, widgets_progresso, pasta_destino, pular_existentes, enable_transicao=True):
     """
     Roda numa thread separada — todo o processamento ffmpeg acontece
     aqui, fora da thread principal, pra não travar a interface durante
@@ -1868,7 +2002,7 @@ def _gerar_cortes_worker(path, segments, enable_fade_in, enable_fade_out, enable
         tela.after(0, lambda c=c, a=a: atualizar_janela_progresso(widgets_progresso, concluidos=c, em_andamento=a))
         tela.after(0, lambda p=percent: progress.config(value=p))
 
-    def _montar_comando_render(start, duration_str, filtros_fade, codec_args, caminho_temp):
+    def _montar_comando_render(start, duration_str, filtros_fade, codec_args, caminho_temp, juncao=None):
         """
         Monta UM comando ffmpeg que já faz tudo: corta, aplica fade e
         logo e, se tiver endslate, emenda ele no final — o vídeo é
@@ -1877,20 +2011,42 @@ def _gerar_cortes_worker(path, segments, enable_fade_in, enable_fade_out, enable
 
         A duração (-t) vai ANTES do -i do vídeo: assim limita só o corte,
         e não o resultado final (que com endslate é mais longo).
-        """
-        entrada_principal = f'-ss {start} '
-        if duration_str:
-            entrada_principal += f'-t {duration_str} '
-        entrada_principal += f'-i "{path}"'
 
-        entradas = [entrada_principal]
+        `juncao` é usado quando o capítulo tem trechos removidos do meio:
+        vem como (entradas_trechos, filtros_juncao), onde entradas_trechos
+        é a lista de (início, duração) de cada trecho MANTIDO e
+        filtros_juncao é o que montar_grafo_juncao() devolveu. Cada trecho
+        vira uma entrada própria do ffmpeg (com -ss, que pula direto pro
+        ponto certo sem decodificar o que foi removido); fade, logo e
+        endslate são aplicados DEPOIS da junção, em cima de [vj]/[aj].
+        """
+        if juncao:
+            entradas_trechos, filtros_juncao = juncao
+            entradas = [
+                f'-ss {inicio:.3f} -t {duracao:.3f} -i "{path}"'
+                for inicio, duracao in entradas_trechos
+            ]
+            grafo = list(filtros_juncao)
+            video_origem = "[vj]"
+            audio_origem = "[aj]"
+        else:
+            entrada_principal = f'-ss {start} '
+            if duration_str:
+                entrada_principal += f'-t {duration_str} '
+            entrada_principal += f'-i "{path}"'
+
+            entradas = [entrada_principal]
+            grafo = []
+            video_origem = "[0:v]"
+            audio_origem = "[0:a]"
+
+        indice_logo = len(entradas)
         if enable_logo:
             entradas.append(f'-i "{logo_path}"')
         indice_endslate = len(entradas)
         if enable_endslate:
             entradas.append(f'-i "{endslate_path}"')
 
-        grafo = []
         if enable_logo:
             if LOGO_POSICAO_X is not None and LOGO_POSICAO_Y is not None:
                 posicao_overlay = f"{LOGO_POSICAO_X}:{LOGO_POSICAO_Y}"
@@ -1898,20 +2054,24 @@ def _gerar_cortes_worker(path, segments, enable_fade_in, enable_fade_out, enable
                 posicao_overlay = "W-w-40:40"
 
             cadeia_base = ",".join(["scale=1920:1080"] + filtros_fade)
-            grafo.append(f"[1:v]scale={LOGO_TAMANHO}:{LOGO_TAMANHO}[logo]")
-            grafo.append(f"[0:v]{cadeia_base}[base]")
+            grafo.append(f"[{indice_logo}:v]scale={LOGO_TAMANHO}:{LOGO_TAMANHO}[logo]")
+            grafo.append(f"{video_origem}{cadeia_base}[base]")
             video_principal = f"[base][logo]overlay={posicao_overlay}"
         else:
-            video_principal = "[0:v]" + (",".join(filtros_fade) or "null")
+            video_principal = video_origem + (",".join(filtros_fade) or "null")
 
         if enable_endslate:
             grafo.append(f"{video_principal},{normalizar_video}[v0]")
             grafo.append(f"[{indice_endslate}:v]{normalizar_video}[v1]")
-            grafo.append(f"[0:a]{normalizar_audio}[a0]")
+            grafo.append(f"{audio_origem}{normalizar_audio}[a0]")
             grafo.append(f"[{indice_endslate}:a]{normalizar_audio}[a1]")
             grafo.append("[v0][a0][v1][a1]concat=n=2:v=1:a=1[outv][outa]")
             mapas = '-map "[outv]" -map "[outa]"'
             codec_audio = ""  # áudio passa por filtro, então é recodificado (AAC padrão)
+        elif juncao:
+            grafo.append(f"{video_principal}[outv]")
+            mapas = '-map "[outv]" -map "[aj]"'
+            codec_audio = ""  # o áudio passou pelo filtro de junção, então é recodificado (AAC padrão)
         else:
             grafo.append(f"{video_principal}[outv]")
             mapas = '-map "[outv]" -map 0:a'
@@ -1927,12 +2087,55 @@ def _gerar_cortes_worker(path, segments, enable_fade_in, enable_fade_out, enable
             f'"{caminho_temp}"'
         )
 
-    def _cortar_um(start, end, title, caminho_saida_final):
+    def _cortar_um(start, end, title, caminho_saida_final, remover=()):
         """Gera o arquivo de um corte e devolve o código de saída do ffmpeg."""
-        ## Calculo de duração dos segmentos
         total_seconds = None
         duration_str = None
-        if end is not None:
+        juncao = None
+
+        if remover:
+            # Capítulo com trechos removidos do meio (ex: um ad). Calcula
+            # o que SOBRA; se sobrar mais de um pedaço, eles são juntados
+            # num comando só (ver _montar_comando_render).
+            inicio_capitulo = _hhmmss_para_segundos(start)
+            if end is not None:
+                fim_capitulo = _hhmmss_para_segundos(end)
+            else:
+                fim_capitulo = obter_duracao_video(path)
+                if not fim_capitulo:
+                    raise RuntimeError(
+                        "não consegui ler a duração do vídeo pra calcular os trechos do último capítulo"
+                    )
+
+            mantidos = calcular_trechos_mantidos(inicio_capitulo, fim_capitulo, remover)
+            if not mantidos:
+                raise RuntimeError("os trechos removidos cobrem o capítulo inteiro — não sobrou nada pra cortar")
+
+            if len(mantidos) == 1:
+                # Só cortou uma ponta do capítulo: é um corte comum, só
+                # que começando/terminando em outro ponto.
+                inicio_trecho, fim_trecho = mantidos[0]
+                start = f"{inicio_trecho:.3f}"
+                total_seconds = fim_trecho - inicio_trecho
+                duration_str = f"{total_seconds:.3f}"
+            else:
+                # Duração de cada trecho arredondada pra um número inteiro
+                # de quadros: o cross dissolve é posicionado pelo tempo
+                # exato em que o trecho anterior termina.
+                fps = obter_fps_video(path)
+                duracoes = [round((fim - inicio) * fps) / fps for inicio, fim in mantidos]
+
+                transicao = TRANSICAO_EMENDA_SEGUNDOS if enable_transicao else 0
+                if min(duracoes) <= 2 * transicao:
+                    transicao = 0  # trecho curto demais pra caber a transição dos dois lados
+
+                filtros_juncao, total_seconds = montar_grafo_juncao(duracoes, transicao, fps)
+                juncao = (
+                    [(inicio, duracao) for (inicio, _), duracao in zip(mantidos, duracoes)],
+                    filtros_juncao,
+                )
+        elif end is not None:
+            ## Calculo de duração dos segmentos
             start_dt = datetime.strptime(start, "%H:%M:%S")
             end_dt = datetime.strptime(end, "%H:%M:%S")
 
@@ -1945,11 +2148,12 @@ def _gerar_cortes_worker(path, segments, enable_fade_in, enable_fade_out, enable
 
             duration_str = f"{hours:02}:{minutes:02}:{seconds:02}"
 
-        # Fade out só existe quando o capítulo tem fim conhecido — o
+        # Fade out só existe quando a duração do corte é conhecida — o
         # último capítulo (sem fim, vai até o final do vídeo) não tem
         # duração calculada, então sai sem fade out em vez de quebrar.
+        # Com trechos juntados, a duração é a do corte JÁ emendado.
         filtros_fade = []
-        if enable_fade_out and end is not None and total_seconds > fade_duration:
+        if enable_fade_out and total_seconds is not None and total_seconds > fade_duration:
             filtros_fade.append(
                 f"fade=t=out:"
                 f"st={total_seconds - fade_duration}:"
@@ -1962,10 +2166,10 @@ def _gerar_cortes_worker(path, segments, enable_fade_in, enable_fade_out, enable
                 f"d={fade_duration}"
             )
 
-        needs_render = bool(filtros_fade) or enable_endslate or enable_logo
+        needs_render = bool(filtros_fade) or enable_endslate or enable_logo or juncao is not None
 
         if not needs_render:
-            if end:
+            if duration_str:
                 cmd = (
                     f'ffmpeg -y -ss {start} '
                     f'-i "{path}" '
@@ -2000,7 +2204,7 @@ def _gerar_cortes_worker(path, segments, enable_fade_in, enable_fade_out, enable
             # Assim não trava nem pra mim nem pro colega se algum driver
             # estiver atrasado — só fica mais lento nesse caso.
             for indice_encoder, codec_args in enumerate(ENCODERS_VIDEO_TENTATIVA):
-                cmd = _montar_comando_render(start, duration_str, filtros_fade, codec_args, caminho_temp)
+                cmd = _montar_comando_render(start, duration_str, filtros_fade, codec_args, caminho_temp, juncao)
                 codigo_saida = executar_comando_cancelavel(cmd)
                 print(cmd)
 
@@ -2047,7 +2251,7 @@ def _gerar_cortes_worker(path, segments, enable_fade_in, enable_fade_out, enable
 
         status = "falha"
         try:
-            codigo_saida = _cortar_um(start, end, title, caminho_saida_final)
+            codigo_saida = _cortar_um(start, end, title, caminho_saida_final, seg.get("remover") or ())
 
             if _cancelar_geracao["solicitado"]:
                 status = "cancelado"
@@ -4156,6 +4360,7 @@ frame_logo.pack(pady=10)
 # Vars
 fade_in_var = tk.BooleanVar()
 fade_out_var = tk.BooleanVar()
+transicao_emenda_var = tk.BooleanVar(value=True)
 endslate_var = tk.BooleanVar()
 endslate_path_var = tk.StringVar()
 logo_var = tk.BooleanVar(value=True)
@@ -4184,6 +4389,21 @@ check_fade_out = tk.Checkbutton(
 )
 
 check_fade_out.pack(side="left", padx=10)
+
+# Só tem efeito em capítulo com trecho removido do meio: liga o cross
+# dissolve (vídeo) + crossfade (áudio) em cada emenda. Desmarcado, a
+# emenda é corte seco.
+check_transicao_emenda = tk.Checkbutton(
+    frame_opcoes,
+    text="Transição nas emendas",
+    variable=transicao_emenda_var,
+    bg="#7F14B7",
+    fg="#FEF500",
+    selectcolor="#7F14B7",
+    font=("Industry-Black", 10, "bold")
+)
+
+check_transicao_emenda.pack(side="left", padx=10)
 
 check_endslate = tk.Checkbutton(
     frame_opcoes,

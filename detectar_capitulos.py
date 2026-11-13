@@ -23,7 +23,7 @@ MODELO_EMBEDDING = "sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2"
 
 TAMANHO_JANELA    = 60    # segundos por chunk
 SOBREPOSICAO      = 20    # segundos de sobreposição entre chunks
-LIMIAR            = 0.70  # confirmado por reavaliação no dataset grande (platô 0.70-0.85, MAE mediano ~2.3min)
+LIMIAR            = 0.75  # confirmado por reavaliação no dataset grande (platô 0.70-0.85, MAE mediano ~2.3min)
 DISTANCIA_MINIMA  = 180   # segundos mínimos entre duas fronteiras (evita over-segmentação)
 
 PADRAO_LINHA_TRANSCRICAO = re.compile(r'^\[(\d{1,4}):(\d{2})\]\s*(.*)$')

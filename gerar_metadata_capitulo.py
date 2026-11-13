@@ -17,7 +17,7 @@ import time
 
 from google import genai
 
-MODEL_NAME     = "gemini-3.1-flash-lite"  # mesmo modelo usado no notebook
+MODEL_NAME     = "gemini-3.5-flash-lite"  # mesmo modelo usado no notebook
 
 N_EXEMPLOS_POSITIVOS = 4
 N_EXEMPLOS_NEGATIVOS = 4

@@ -22,7 +22,10 @@ Uso:
 """
 
 import re
+import shutil
+import sys
 
+import win32com
 import win32com.client
 
 CAMINHO_TEMPLATE = r"C:\Users\andre\Downloads\projetos\flowgames-timestamp-helper\scripts\thumb_corte_template.psd"
@@ -210,12 +213,43 @@ try {{
 """
 
 
+def _obter_app_photoshop():
+    """
+    gencache.EnsureDispatch guarda em disco um "wrapper" Python gerado a
+    partir da interface COM do Photoshop (win32com\\gen_py\\...), pra não
+    precisar reconstruir toda vez. Esse cache pode ficar
+    corrompido/desatualizado — ex: depois de uma atualização do
+    Photoshop, ou uma geração anterior interrompida no meio — e aí toda
+    chamada quebra com AttributeError tipo "module '...' has no
+    attribute 'CLSIDToPackageMap'". Tentar de novo sem limpar o cache NÃO
+    resolve (é por isso que as 3 tentativas do app.py falhavam sempre do
+    mesmo jeito).
+
+    IMPORTANTE: só apagar a pasta em disco não basta — o Python, dentro
+    desse mesmo processo, já importou o módulo quebrado (fica guardado
+    em sys.modules); se só apagar o arquivo e tentar de novo, o
+    gencache acha esse módulo já carregado em memória (ainda quebrado)
+    antes de ir olhar o disco de novo, e cai no mesmo erro. Por isso,
+    além de apagar a pasta, também remove esses módulos de
+    sys.modules e força o gencache a reconstruir do zero.
+    """
+    try:
+        return win32com.client.gencache.EnsureDispatch("Photoshop.Application")
+    except AttributeError:
+        for nome in [n for n in list(sys.modules) if n.startswith("win32com.gen_py")]:
+            del sys.modules[nome]
+        shutil.rmtree(win32com.__gen_path__, ignore_errors=True)
+        win32com.client.gencache.is_readonly = False
+        win32com.client.gencache.Rebuild()
+        return win32com.client.gencache.EnsureDispatch("Photoshop.Application")
+
+
 def gerar_thumbnail(caminho_template, caminho_imagem, caminho_frame, linha1, linha2, caminho_saida, deslocamento_texto_x=0, lado="direita", copiar_sombra=False):
     # gencache.EnsureDispatch (em vez de Dispatch simples) resolve um
     # problema comum de "argumento ausente" com interfaces COM da
     # Adobe — o late binding do Dispatch simples às vezes não lida bem
     # com parâmetros opcionais, mesmo passando o argumento certo.
-    app = win32com.client.gencache.EnsureDispatch("Photoshop.Application")
+    app = _obter_app_photoshop()
     script = montar_jsx(caminho_template, caminho_imagem, caminho_frame, linha1, linha2, caminho_saida, deslocamento_texto_x, lado, copiar_sombra)
     resultado = app.DoJavaScript(script)
     return resultado

@@ -669,14 +669,20 @@ def get_timestamps():
 
             #Tratamento de erros adicionais
             if "-" not in l:
-                messagebox.showerror("Erro", "Formato de timestamp inválido! Use: <timestamp> - <title>")
+                messagebox.showerror(
+                    "Erro",
+                    f"Linha {i + 1} inválida: \"{l}\"\nFormato esperado: <timestamp> - <título>"
+                )
                 return None
             elif i == 0 and "00:00:00" not in l:
                 messagebox.showerror("Erro", "A primeira timestamp deve ser 00:00:00")
                 return None
             split_l = l.split(" - ", 1)
             if len(split_l) == 1:
-                messagebox.showerror("Erro", "Formato de timestamp inválido! Use: <timestamp> - <title>")
+                messagebox.showerror(
+                    "Erro",
+                    f"Linha {i + 1} inválida: \"{l}\"\nFormato esperado: <timestamp> - <título>"
+                )
                 return None
 
             timestamp = split_l[0]
@@ -689,7 +695,18 @@ def get_timestamps():
             timestamp,
             ))
     except ValueError:
-        messagebox.showerror("Erro", "Formato de timestamp inválido! Use HH:MM:SS")
+        # IMPORTANTE: antes faltava esse "return None" — a função caía pra
+        # fora do try/except e devolvia a lista PARCIAL (só o que já tinha
+        # processado antes da linha inválida) como se fosse válida.
+        # carregar_capitulos() não tinha como saber que deu erro, apagava
+        # os capítulos antigos da tela e recarregava com essa lista
+        # incompleta (às vezes vazia de vez — painel em branco), sem
+        # avisar qual linha realmente quebrou.
+        messagebox.showerror(
+            "Erro",
+            f"Linha {i + 1}: timestamp \"{timestamp}\" não está no formato HH:MM:SS"
+        )
+        return None
 
     return timestamps
 
@@ -1832,13 +1849,19 @@ def _gerar_cortes_worker(path, segments, enable_fade_in, enable_fade_out, enable
     """
     fade_duration = 1.4
 
-    ## Pasta de Output ##
-    pasta_original = os.getcwd()
-    os.chdir(pasta_destino)
+    # Mesma normalização que o concat com endslate sempre usou — o corte
+    # e o endslate precisam sair com resolução/fps/áudio iguais pra
+    # poderem ser emendados.
+    normalizar_video = (
+        "scale=1920:1080:force_original_aspect_ratio=decrease,"
+        "pad=1920:1080:(ow-iw)/2:(oh-ih)/2,setsar=1,fps=30,format=yuv420p"
+    )
+    normalizar_audio = "aresample=44100,aformat=sample_fmts=fltp:channel_layouts=stereo"
 
     total_segments = len(segments)
     lock_contadores = threading.Lock()
     contadores = {"concluidos": 0, "em_andamento": 0}
+    resultados_por_indice = {}
 
     def _atualizar_progresso_geral():
         # Chamado sempre com lock_contadores já seguro (dentro do "with").
@@ -1847,25 +1870,67 @@ def _gerar_cortes_worker(path, segments, enable_fade_in, enable_fade_out, enable
         tela.after(0, lambda c=c, a=a: atualizar_janela_progresso(widgets_progresso, concluidos=c, em_andamento=a))
         tela.after(0, lambda p=percent: progress.config(value=p))
 
-    def _processar_um(i, seg):
-        start = seg["start"]
-        end = seg["end"]
-        title = seg["title"]
+    def _montar_comando_render(start, duration_str, filtros_fade, codec_args, caminho_temp):
+        """
+        Monta UM comando ffmpeg que já faz tudo: corta, aplica fade e
+        logo e, se tiver endslate, emenda ele no final — o vídeo é
+        codificado uma vez só (antes eram dois comandos, render e depois
+        concat, cada um recodificando o corte inteiro).
 
-        if _cancelar_geracao["solicitado"]:
-            return {"title": title, "status": "cancelado", "arquivos": []}
+        A duração (-t) vai ANTES do -i do vídeo: assim limita só o corte,
+        e não o resultado final (que com endslate é mais longo).
+        """
+        entrada_principal = f'-ss {start} '
+        if duration_str:
+            entrada_principal += f'-t {duration_str} '
+        entrada_principal += f'-i "{path}"'
 
-        caminho_saida_esperado = os.path.join(pasta_destino, f"{title}.mp4")
-        if pular_existentes and os.path.exists(caminho_saida_esperado):
-            with lock_contadores:
-                contadores["concluidos"] += 1
-                _atualizar_progresso_geral()
-            return {"title": title, "status": "pulado", "arquivos": [caminho_saida_esperado]}
+        entradas = [entrada_principal]
+        if enable_logo:
+            entradas.append(f'-i "{logo_path}"')
+        indice_endslate = len(entradas)
+        if enable_endslate:
+            entradas.append(f'-i "{endslate_path}"')
 
-        with lock_contadores:
-            contadores["em_andamento"] += 1
-            _atualizar_progresso_geral()
+        grafo = []
+        if enable_logo:
+            if LOGO_POSICAO_X is not None and LOGO_POSICAO_Y is not None:
+                posicao_overlay = f"{LOGO_POSICAO_X}:{LOGO_POSICAO_Y}"
+            else:
+                posicao_overlay = "W-w-40:40"
 
+            cadeia_base = ",".join(["scale=1920:1080"] + filtros_fade)
+            grafo.append(f"[1:v]scale={LOGO_TAMANHO}:{LOGO_TAMANHO}[logo]")
+            grafo.append(f"[0:v]{cadeia_base}[base]")
+            video_principal = f"[base][logo]overlay={posicao_overlay}"
+        else:
+            video_principal = "[0:v]" + (",".join(filtros_fade) or "null")
+
+        if enable_endslate:
+            grafo.append(f"{video_principal},{normalizar_video}[v0]")
+            grafo.append(f"[{indice_endslate}:v]{normalizar_video}[v1]")
+            grafo.append(f"[0:a]{normalizar_audio}[a0]")
+            grafo.append(f"[{indice_endslate}:a]{normalizar_audio}[a1]")
+            grafo.append("[v0][a0][v1][a1]concat=n=2:v=1:a=1[outv][outa]")
+            mapas = '-map "[outv]" -map "[outa]"'
+            codec_audio = ""  # áudio passa por filtro, então é recodificado (AAC padrão)
+        else:
+            grafo.append(f"{video_principal}[outv]")
+            mapas = '-map "[outv]" -map 0:a'
+            codec_audio = "-c:a copy"
+
+        return (
+            f'ffmpeg -y '
+            f'{" ".join(entradas)} '
+            f'-filter_complex "{";".join(grafo)}" '
+            f'{mapas} '
+            f'{codec_args} '
+            f'{codec_audio} '
+            f'"{caminho_temp}"'
+        )
+
+    def _cortar_um(start, end, title, caminho_saida_final):
+        """Gera o arquivo de um corte e devolve o código de saída do ffmpeg."""
         ## Calculo de duração dos segmentos
         total_seconds = None
         duration_str = None
@@ -1881,14 +1946,25 @@ def _gerar_cortes_worker(path, segments, enable_fade_in, enable_fade_out, enable
             seconds = total_seconds % 60
 
             duration_str = f"{hours:02}:{minutes:02}:{seconds:02}"
-        needs_render = (
-                enable_fade_in
-                or enable_fade_out
-                or enable_endslate
-                or enable_logo
-        )
 
-        caminho_saida_final = os.path.join(pasta_destino, f"{title}.mp4")
+        # Fade out só existe quando o capítulo tem fim conhecido — o
+        # último capítulo (sem fim, vai até o final do vídeo) não tem
+        # duração calculada, então sai sem fade out em vez de quebrar.
+        filtros_fade = []
+        if enable_fade_out and end is not None and total_seconds > fade_duration:
+            filtros_fade.append(
+                f"fade=t=out:"
+                f"st={total_seconds - fade_duration}:"
+                f"d={fade_duration}"
+            )
+        if enable_fade_in:
+            filtros_fade.append(
+                f"fade=t=in:"
+                f"st=0:"
+                f"d={fade_duration}"
+            )
+
+        needs_render = bool(filtros_fade) or enable_endslate or enable_logo
 
         if not needs_render:
             if end:
@@ -1909,68 +1985,15 @@ def _gerar_cortes_worker(path, segments, enable_fade_in, enable_fade_out, enable
                 )
             codigo_saida = executar_comando_cancelavel(cmd)
             print(cmd)
-        else:
-            # Habilita o render do input p/ o input (uso do fade-in e fadeout):
-            # Aviso: o fade-in e fade-out não funcionam no último clipe
-            filters = []
+            return codigo_saida
 
-            if enable_fade_out and total_seconds > fade_duration and end is not None:
-                filters.append(
-                    f"fade=t=out:"
-                    f"st={total_seconds - fade_duration}:"
-                    f"d={fade_duration}"
-                )
-            if enable_fade_in:
-                filters.append(
-                    f"fade=t=in:"
-                    f"st=0:"
-                    f"d={fade_duration}"
-                )
-            filter_complex = ""
-            temp_output = f"temp_{title}.mp4"
-
-            # Se tiver logo
-            if enable_logo:
-
-                if len(filters) > 0:
-                    video_chain = ",".join(filters)
-                else:
-                    video_chain = "null"
-
-                if LOGO_POSICAO_X is not None and LOGO_POSICAO_Y is not None:
-                    posicao_overlay = f"{LOGO_POSICAO_X}:{LOGO_POSICAO_Y}"
-                else:
-                    posicao_overlay = "W-w-40:40"
-
-                filter_complex = (
-                    f'"[1:v]scale={LOGO_TAMANHO}:{LOGO_TAMANHO}[logo];'
-                    f'[0:v]scale=1920:1080,{video_chain}[base];'
-                    f'[base][logo]overlay={posicao_overlay}[outv]"'
-                )
-
-            else:
-                if len(filters) > 0:
-                    filter_complex = (
-                        f'"[0:v]{",".join(filters)}[outv]"'
-                    )
-
-
-            filter_complex_cmd = ""
-            map_video = '-map 0:v'
-
-            if filter_complex:
-                filter_complex_cmd = (
-                    f'-filter_complex {filter_complex}'
-                )
-
-                map_video = '-map "[outv]"'
-            if enable_logo:
-
-                input_logo = f'-i "{logo_path}"'
-
-            else:
-                input_logo = ""
-
+        # O render escreve num arquivo temporário e só vira o arquivo
+        # final (renomeando, que é instantâneo) quando termina certo —
+        # assim um corte cancelado ou que falhou nunca deixa um .mp4
+        # pela metade com o nome final. O temporário é sempre apagado.
+        caminho_temp = os.path.join(pasta_destino, f"temp_{title}.mp4")
+        codigo_saida = None
+        try:
             # Tenta primeiro pela GPU (h264_nvenc, bem mais rápido) — se
             # falhar (comum quando o driver da NVIDIA tá desatualizado
             # pra versão do ffmpeg em uso — "Driver does not support the
@@ -1978,81 +2001,12 @@ def _gerar_cortes_worker(path, segments, enable_fade_in, enable_fade_out, enable
             # processador (libx264), que não depende de driver nenhum.
             # Assim não trava nem pra mim nem pro colega se algum driver
             # estiver atrasado — só fica mais lento nesse caso.
-            codigo_saida = None
             for indice_encoder, codec_args in enumerate(ENCODERS_VIDEO_TENTATIVA):
-                ## Render
-                if end:
-                    cmd_render = (
-                        f'ffmpeg -y '
-                        f'-ss {start} '
-                        f'-i "{path}" '
-                        f'{input_logo} '
-                        f'-t {duration_str} '
-                        f'{filter_complex_cmd} '
-                        f'{map_video} '
-                        f'-map 0:a '
-                        f'{codec_args} '
-                        f'-c:a copy '
-                        f'"{temp_output}"'
-                    )
-
-                else:
-                    cmd_render = (
-                        f'ffmpeg -y '
-                        f'-ss {start} '
-                        f'-i "{path}" '
-                        f'{input_logo} '
-                        f'{filter_complex_cmd} '
-                        f'{map_video} '
-                        f'-map 0:a '
-                        f'{codec_args} '
-                        f'-c:a copy '
-                        f'"{temp_output}"'
-                    )
-                if not enable_endslate:
-
-                    final_output = f"{title}.mp4"
-
-                    cmd_finalize = (
-                        f'ffmpeg -y '
-                        f'-i "{temp_output}" '
-                        f'-c copy '
-                        f'"{final_output}"'
-                    )
-
-                    cmd = (
-                            cmd_render
-                            + " && " +
-                            cmd_finalize
-                    )
-                # Se tiver endslate
-                else:
-
-                    final_output = f"{title}.mp4"
-
-                    cmd_concat = (
-                        f'ffmpeg -y '
-                        f'-i "{temp_output}" '
-                        f'-i "{endslate_path}" '
-                        f'-filter_complex '
-                        f'"[0:v][0:a][1:v][1:a]'
-                        f'concat=n=2:v=1:a=1[v][a]" '
-                        f'-map "[v]" '
-                        f'-map "[a]" '
-                        f'{codec_args} '
-                        f'"{final_output}"'
-                    )
-
-                    cmd = (
-                            cmd_render
-                            + " && " +
-                            cmd_concat
-                    )
-
+                cmd = _montar_comando_render(start, duration_str, filtros_fade, codec_args, caminho_temp)
                 codigo_saida = executar_comando_cancelavel(cmd)
                 print(cmd)
 
-                if codigo_saida == 0 and os.path.exists(caminho_saida_final):
+                if codigo_saida == 0 and os.path.exists(caminho_temp):
                     break  # deu certo, não precisa tentar o próximo encoder
 
                 if _cancelar_geracao["solicitado"]:
@@ -2063,17 +2017,51 @@ def _gerar_cortes_worker(path, segments, enable_fade_in, enable_fade_out, enable
                         tk.END, f"\"{t}\": falha codificando pela GPU, tentando pelo processador (mais lento)...\n"
                     ))
 
+            if codigo_saida == 0 and os.path.exists(caminho_temp):
+                os.replace(caminho_temp, caminho_saida_final)
+        finally:
+            if os.path.exists(caminho_temp):
+                try:
+                    os.remove(caminho_temp)
+                except OSError:
+                    pass
+
+        return codigo_saida
+
+    def _processar_um(i, seg):
+        start = seg["start"]
+        end = seg["end"]
+        title = seg["title"]
+
         if _cancelar_geracao["solicitado"]:
-            status = "cancelado"
-        elif codigo_saida == 0 and os.path.exists(caminho_saida_final):
-            status = "sucesso"
-        else:
-            status = "falha"
+            return {"title": title, "status": "cancelado", "arquivos": []}
+
+        caminho_saida_final = os.path.join(pasta_destino, f"{title}.mp4")
+        if pular_existentes and os.path.exists(caminho_saida_final):
+            with lock_contadores:
+                contadores["concluidos"] += 1
+                _atualizar_progresso_geral()
+            return {"title": title, "status": "pulado", "arquivos": [caminho_saida_final]}
 
         with lock_contadores:
-            contadores["em_andamento"] -= 1
-            contadores["concluidos"] += 1
+            contadores["em_andamento"] += 1
             _atualizar_progresso_geral()
+
+        status = "falha"
+        try:
+            codigo_saida = _cortar_um(start, end, title, caminho_saida_final)
+
+            if _cancelar_geracao["solicitado"]:
+                status = "cancelado"
+            elif codigo_saida == 0 and os.path.exists(caminho_saida_final):
+                status = "sucesso"
+        finally:
+            # No finally pra o contador de "em andamento" não ficar preso
+            # quando um corte quebra com erro inesperado.
+            with lock_contadores:
+                contadores["em_andamento"] -= 1
+                contadores["concluidos"] += 1
+                _atualizar_progresso_geral()
 
         tela.after(0, lambda i=i, status=status: txt_saida.insert(
             tk.END, f"Clipe {i + 1}/{total_segments}: {status.upper()}\n"
@@ -2085,36 +2073,59 @@ def _gerar_cortes_worker(path, segments, enable_fade_in, enable_fade_out, enable
             "arquivos": [caminho_saida_final] if status == "sucesso" else [],
         }
 
-    ## Processamento dos segmentos — até PARALLEL_WORKERS ao mesmo tempo ##
-    resultados_por_indice = {}
-    with concurrent.futures.ThreadPoolExecutor(max_workers=PARALLEL_WORKERS) as executor:
-        futuros = {executor.submit(_processar_um, i, seg): i for i, seg in enumerate(segments)}
-        for futuro in concurrent.futures.as_completed(futuros):
-            i = futuros[futuro]
-            try:
-                resultados_por_indice[i] = futuro.result()
-            except Exception as e:
-                # Erro inesperado (fora dos tratados dentro de
-                # _processar_um) não pode travar o lote inteiro nem
-                # deixar a janela de progresso presa — vira "falha" e o
-                # resto continua normal, com o erro real registrado.
-                titulo = segments[i].get("title", f"segmento {i + 1}")
-                tela.after(0, lambda t=titulo, e=str(e): txt_saida.insert(
-                    tk.END, f"[ERRO] \"{t}\" falhou inesperadamente: {e}\n"
-                ))
-                resultados_por_indice[i] = {"title": titulo, "status": "falha", "arquivos": []}
+    ## Pasta de Output ##
+    pasta_original = os.getcwd()
 
-    # Reordena pro mesmo formato de sempre (ordem original dos capítulos),
-    # já que terminar em paralelo bagunça a ordem de conclusão.
-    resultados = [resultados_por_indice[i] for i in range(total_segments)]
+    # try/finally em volta de tudo: aconteça o que acontecer aqui dentro,
+    # a trava de operação é liberada, a pasta de trabalho volta pro lugar
+    # e a janela de progresso fecha — sem isso, um erro inesperado deixava
+    # os botões de corte/preview desabilitados até reabrir o programa.
+    try:
+        os.chdir(pasta_destino)
 
-    os.chdir(pasta_original)
-    foi_cancelado = _cancelar_geracao["solicitado"]
-    tela.after(0, lambda: txt_saida.see(tk.END))
-    tela.after(0, _finalizar_operacao_longa)
-    tela.after(0, lambda: fechar_janela_progresso(widgets_progresso))
-    tela.after(0, tocar_som_conclusao)
-    tela.after(0, lambda: mostrar_resultado_geracao("Resultado — Cortes", resultados, foi_cancelado))
+        ## Processamento dos segmentos — até PARALLEL_WORKERS ao mesmo tempo ##
+        with concurrent.futures.ThreadPoolExecutor(max_workers=PARALLEL_WORKERS) as executor:
+            futuros = {executor.submit(_processar_um, i, seg): i for i, seg in enumerate(segments)}
+            for futuro in concurrent.futures.as_completed(futuros):
+                i = futuros[futuro]
+                try:
+                    resultados_por_indice[i] = futuro.result()
+                except Exception as e:
+                    # Erro inesperado (fora dos tratados dentro de
+                    # _processar_um) não pode travar o lote inteiro nem
+                    # deixar a janela de progresso presa — vira "falha" e o
+                    # resto continua normal, com o erro real registrado.
+                    titulo = segments[i].get("title", f"segmento {i + 1}")
+                    tela.after(0, lambda t=titulo, e=str(e): txt_saida.insert(
+                        tk.END, f"[ERRO] \"{t}\" falhou inesperadamente: {e}\n"
+                    ))
+                    resultados_por_indice[i] = {"title": titulo, "status": "falha", "arquivos": []}
+    except Exception as e:
+        tela.after(0, lambda e=str(e): txt_saida.insert(
+            tk.END, f"[ERRO] A geração de cortes parou por um erro inesperado: {e}\n"
+        ))
+    finally:
+        try:
+            os.chdir(pasta_original)
+        except OSError:
+            pass
+
+        # Reordena pro mesmo formato de sempre (ordem original dos capítulos),
+        # já que terminar em paralelo bagunça a ordem de conclusão. Quem
+        # não chegou a ter resultado (lote interrompido) conta como falha.
+        resultados = [
+            resultados_por_indice.get(
+                i, {"title": segments[i].get("title", f"segmento {i + 1}"), "status": "falha", "arquivos": []}
+            )
+            for i in range(total_segments)
+        ]
+        foi_cancelado = _cancelar_geracao["solicitado"]
+
+        tela.after(0, _finalizar_operacao_longa)
+        tela.after(0, lambda: txt_saida.see(tk.END))
+        tela.after(0, lambda: fechar_janela_progresso(widgets_progresso))
+        tela.after(0, tocar_som_conclusao)
+        tela.after(0, lambda: mostrar_resultado_geracao("Resultado — Cortes", resultados, foi_cancelado))
 
 
 def generate_clips_preview():
@@ -2803,21 +2814,36 @@ def abrir_scrubber_live(titulo_janela="Escolher frame da live", seg_atual=None):
     return resultado["caminho"]
 
 
+def _fracao_van_der_corput(indice, base=2):
+    """
+    Sequência de baixa discrepância (van der Corput): 0, 1/2, 1/4, 3/4,
+    1/8, 5/8, ... — cada índice novo cai no meio dos intervalos que a
+    sequência ainda não cobriu, em vez de repetir os mesmos pontos. Usada
+    pra deslocar a grade de candidatos a cada "Recarregar", cobrindo aos
+    poucos o vídeo inteiro em vez de ficar sempre nos mesmos timestamps.
+    """
+    fracao, denominador, i = 0.0, 1.0, indice
+    while i > 0:
+        denominador *= base
+        i, resto = divmod(i, base)
+        fracao += resto / denominador
+    return fracao
+
+
 def selecionar_frame_host(seg, titulo_janela="Selecionar frame do host"):
     """
-    Abre uma janela com miniaturas de frames candidatos espalhados pela
-    duração do corte, pra escolher qual vira o frame do host na
-    thumbnail. Também dá pra escolher um arquivo manual, ou buscar um
-    timestamp específico em qualquer outra parte da live — pro caso do
-    corte em si não ter um bom frame do host.
+    Abre uma janela com miniaturas de frames candidatos, pra escolher
+    qual vira o frame do host na thumbnail. Também dá pra: escolher um
+    arquivo manual; trocar a FAIXA de busca (outro capítulo carregado,
+    ou a live inteira — útil quando o corte em si não tem um bom frame,
+    comum em corte de reação onde o rosto só aparece bem em outro
+    trecho); recarregar pra pegar candidatos novos sem repetir
+    timestamps já mostrados; ou buscar um timestamp específico com o
+    player de ajuste fino (±1 frame/±1s/±10s).
 
-    A extração dos frames (até 6 chamadas de ffmpeg, uma por candidato)
-    roda numa thread separada, em paralelo — antes rodava sequencial,
-    direto na thread principal, ANTES até de abrir essa janela, o que
-    travava o app inteiro (sem nenhuma resposta na tela) pelo tempo
-    inteiro da extração. Agora a janela abre na hora, mostrando "gerando
-    frames..." enquanto isso, e os botões "Escolher arquivo" / "Buscar
-    outro momento" já funcionam mesmo antes dos candidatos aparecerem.
+    A extração dos frames roda numa thread separada, em paralelo — a
+    janela abre na hora, mostrando "gerando frames..." enquanto isso, e
+    os outros botões já funcionam mesmo antes dos candidatos aparecerem.
 
     Retorna o caminho do frame escolhido, ou None se cancelado.
     """
@@ -2825,43 +2851,46 @@ def selecionar_frame_host(seg, titulo_janela="Selecionar frame do host"):
     if not path:
         return None
 
-    inicio_dt = datetime.strptime(seg["start"], "%H:%M:%S")
-    inicio_segundos = inicio_dt.hour * 3600 + inicio_dt.minute * 60 + inicio_dt.second
+    duracao_total = obter_duracao_video(path)
+    if not duracao_total:
+        messagebox.showerror("Erro", "Não consegui determinar a duração do vídeo.")
+        return None
 
-    if seg["end"]:
-        fim_dt = datetime.strptime(seg["end"], "%H:%M:%S")
-        fim_segundos = fim_dt.hour * 3600 + fim_dt.minute * 60 + fim_dt.second
-    else:
-        fim_segundos = inicio_segundos + 60  # sem fim definido, usa só 60s como faixa de candidatos
+    inicio_seg = _hhmmss_para_segundos(seg["start"])
+    fim_seg = _hhmmss_para_segundos(seg["end"]) if seg["end"] else min(inicio_seg + 60, duracao_total)
 
-    duracao = max(1, fim_segundos - inicio_segundos)
-    n_candidatos = min(6, max(2, duracao // 5))
-    passo = duracao / n_candidatos
+    # Faixas disponíveis pra buscar candidatos: o corte atual + cada
+    # capítulo carregado + a live inteira — mesmo padrão do "Buscar
+    # outro momento da live" (abrir_scrubber_live), mas aqui pra gerar
+    # uma nova leva de candidatos em vez de abrir outra janela.
+    faixas = {"Este corte": (inicio_seg, fim_seg)}
+    for titulo_cap, info in capitulos_vars.items():
+        seg_cap = info["seg"]
+        ini_cap = _hhmmss_para_segundos(seg_cap["start"])
+        fim_cap = _hhmmss_para_segundos(seg_cap["end"]) if seg_cap["end"] else duracao_total
+        faixas.setdefault(titulo_cap, (ini_cap, fim_cap))
+    faixas["Toda a live"] = (0, duracao_total)
 
     pasta_temp = os.path.join(PASTA_BASE, "_frames_candidatos")
     os.makedirs(pasta_temp, exist_ok=True)
 
-    def _extrair_um_candidato(i):
-        segundo_candidato = inicio_segundos + int(passo * i)
-        h, resto = divmod(segundo_candidato, 3600)
-        m, s = divmod(resto, 60)
-        ts_str = f"{h:02d}:{m:02d}:{s:02d}"
-
-        caminho_candidato = os.path.join(pasta_temp, f"candidato_{i}.jpg")
-        subprocess.run(
-            ["ffmpeg", "-y", "-ss", ts_str, "-i", path, "-frames:v", "1", caminho_candidato],
-            capture_output=True, text=True
-        )
-        if os.path.exists(caminho_candidato):
-            return (ts_str, caminho_candidato)
-        return None
-
     resultado = {"caminho": None}
+    timestamps_ja_mostrados = set()  # em segundos — evita repetir o mesmo frame em recargas/faixas diferentes
+    estado = {"rodada": -1}
 
     janela = tk.Toplevel(tela)
     janela.title(titulo_janela)
     janela.configure(bg="#7F14B7")
     janela.grab_set()  # trava interação com a janela principal até escolher
+
+    tk.Label(
+        janela, text="Buscar candidatos em:",
+        bg="#7F14B7", fg="#FEF500", font=("Industry-Black", 9, "bold")
+    ).pack(pady=(10, 0))
+
+    var_faixa = tk.StringVar(value="Este corte")
+    combo_faixa = Combobox(janela, textvariable=var_faixa, values=list(faixas.keys()), state="readonly", width=55)
+    combo_faixa.pack(pady=5)
 
     tk.Label(
         janela, text="Clique no frame que quer usar:",
@@ -2871,29 +2900,59 @@ def selecionar_frame_host(seg, titulo_janela="Selecionar frame do host"):
     frame_grade = tk.Frame(janela, bg="#7F14B7")
     frame_grade.pack(padx=10, pady=5)
 
-    lbl_carregando = tk.Label(
-        frame_grade, text=f"Gerando {n_candidatos} frames candidatos, aguarde...",
-        bg="#7F14B7", fg="#FFFFFF", font=("Industry-Black", 9)
-    )
-    lbl_carregando.pack(padx=20, pady=20)
-
     imagens_ref = []  # evita as miniaturas serem coletadas como lixo antes da janela fechar
 
     def escolher(caminho):
         resultado["caminho"] = caminho
         janela.destroy()
 
-    def _popular_com_candidatos(caminhos_candidatos):
+    def _calcular_pontos(inicio, fim, rodada):
+        duracao = max(1, fim - inicio)
+        n = min(6, max(2, int(duracao // 5)))
+        passo = duracao / n
+        deslocamento = passo * _fracao_van_der_corput(rodada)
+        pontos = [inicio + deslocamento + passo * i for i in range(n)]
+        return [p for p in pontos if inicio <= p < fim], passo
+
+    def _extrair_um_candidato(segundo_candidato):
+        h, resto = divmod(int(segundo_candidato), 3600)
+        m, s = divmod(resto, 60)
+        ts_str = f"{h:02d}:{m:02d}:{s:02d}"
+
+        caminho_candidato = os.path.join(pasta_temp, f"candidato_{int(segundo_candidato)}.jpg")
+        subprocess.run(
+            ["ffmpeg", "-y", "-ss", ts_str, "-i", path, "-frames:v", "1", caminho_candidato],
+            capture_output=True, text=True
+        )
+        if os.path.exists(caminho_candidato):
+            return (ts_str, caminho_candidato)
+        return None
+
+    def _limpar_grade():
+        for widget in frame_grade.winfo_children():
+            widget.destroy()
+        imagens_ref.clear()
+
+    def _definir_controles_estado(estado_widgets):
+        combo_faixa.config(state="disabled" if estado_widgets == "disabled" else "readonly")
+        btn_recarregar.config(state=estado_widgets)
+
+    def _popular_com_candidatos(caminhos_candidatos, sem_pontos_novos):
         if not janela.winfo_exists():
             return  # usuário já fechou a janela (ex: escolheu arquivo manual) antes de terminar
 
-        lbl_carregando.destroy()
+        _limpar_grade()
+        _definir_controles_estado("normal")
 
         if not caminhos_candidatos:
+            texto_aviso = (
+                "Não sobrou nenhum timestamp novo pra tentar nessa faixa — já foram "
+                "mostrados todos. Tenta outra faixa no menu acima."
+                if sem_pontos_novos else
+                "Não consegui extrair nenhum frame candidato desse trecho."
+            )
             tk.Label(
-                frame_grade,
-                text="Não consegui extrair nenhum frame candidato desse trecho.\n"
-                     "Tenta \"Buscar outro momento da live\" ou \"Escolher arquivo manualmente\".",
+                frame_grade, text=texto_aviso + "\nOu \"Buscar outro momento da live\" / \"Escolher arquivo manualmente\".",
                 bg="#7F14B7", fg="#FFFFFF", wraplength=380, justify="left"
             ).pack(padx=10, pady=10)
             return
@@ -2910,24 +2969,63 @@ def selecionar_frame_host(seg, titulo_janela="Selecionar frame do host"):
             tk.Button(frame_item, image=img_tk, command=lambda c=caminho_candidato: escolher(c)).pack()
             tk.Label(frame_item, text=ts_str, bg="#FFFFFF").pack()
 
-    def _extrair_candidatos_worker():
-        candidatos_por_indice = {}
-        with concurrent.futures.ThreadPoolExecutor(max_workers=min(4, n_candidatos)) as executor:
-            futuros = {executor.submit(_extrair_um_candidato, i): i for i in range(n_candidatos)}
-            for futuro in concurrent.futures.as_completed(futuros):
-                i = futuros[futuro]
-                try:
-                    candidatos_por_indice[i] = futuro.result()
-                except Exception:
-                    candidatos_por_indice[i] = None
+    def _gerar_candidatos():
+        inicio, fim = faixas[var_faixa.get()]
 
-        # Reordena pela ordem original dos timestamps (terminar em paralelo bagunça a ordem de conclusão)
-        caminhos_candidatos = [
-            candidatos_por_indice[i] for i in range(n_candidatos) if candidatos_por_indice.get(i)
-        ]
-        tela.after(0, lambda: _popular_com_candidatos(caminhos_candidatos))
+        # Vai avançando de rodada (grade deslocada) até achar pontos que
+        # ainda não foram mostrados, ou desistir depois de algumas
+        # tentativas (faixa curta já bem explorada).
+        pontos_novos, passo = [], 0
+        for _ in range(6):
+            estado["rodada"] += 1
+            pontos, passo = _calcular_pontos(inicio, fim, estado["rodada"])
+            pontos_novos = [
+                p for p in pontos
+                if not any(abs(p - t) < max(1.0, passo / 3) for t in timestamps_ja_mostrados)
+            ]
+            if pontos_novos:
+                break
 
-    threading.Thread(target=_extrair_candidatos_worker, daemon=True).start()
+        _limpar_grade()
+        _definir_controles_estado("disabled")
+        tk.Label(
+            frame_grade, text=f"Gerando {len(pontos_novos) or 'os'} frames candidatos, aguarde...",
+            bg="#7F14B7", fg="#FFFFFF", font=("Industry-Black", 9)
+        ).pack(padx=20, pady=20)
+
+        def _worker():
+            candidatos_por_indice = {}
+            with concurrent.futures.ThreadPoolExecutor(max_workers=min(4, max(1, len(pontos_novos)))) as executor:
+                futuros = {executor.submit(_extrair_um_candidato, p): idx for idx, p in enumerate(pontos_novos)}
+                for futuro in concurrent.futures.as_completed(futuros):
+                    idx = futuros[futuro]
+                    try:
+                        candidatos_por_indice[idx] = futuro.result()
+                    except Exception:
+                        candidatos_por_indice[idx] = None
+
+            for p in pontos_novos:
+                timestamps_ja_mostrados.add(p)
+
+            # Reordena pela ordem original dos timestamps (terminar em paralelo bagunça a ordem de conclusão)
+            caminhos_candidatos = [
+                candidatos_por_indice[i] for i in range(len(pontos_novos)) if candidatos_por_indice.get(i)
+            ]
+            tela.after(0, lambda: _popular_com_candidatos(caminhos_candidatos, not pontos_novos))
+
+        threading.Thread(target=_worker, daemon=True).start()
+
+    combo_faixa.bind("<<ComboboxSelected>>", lambda e: _gerar_candidatos())
+
+    frame_botoes_topo = tk.Frame(janela, bg="#7F14B7")
+    frame_botoes_topo.pack(pady=(0, 5))
+    btn_recarregar = tk.Button(
+        frame_botoes_topo, text="🔄 Recarregar candidatos", command=_gerar_candidatos,
+        bg="#FFFFFF", fg="#7F14B7", font=("Industry-Black", 9, "bold")
+    )
+    btn_recarregar.pack(side="left")
+
+    _gerar_candidatos()  # geração inicial — mesmo comportamento de antes (rodada 0, sem deslocamento)
 
     def escolher_arquivo():
         caminho = filedialog.askopenfilename(

@@ -98,7 +98,14 @@ def montar_thumbnail_completa(
 
     if resultado != "OK":
         print(f"\n[ERRO] {resultado}")
-        return None
+        # Antes só devolvia None aqui — quem chama (app.py) não tinha como
+        # saber o motivo real (o Photoshop já devolve a etapa exata que
+        # falhou em `resultado`, mas isso ia só pro print acima, que some
+        # sem console aberto). Levanta a exceção com o motivo de verdade,
+        # pra aparecer pro usuário depois das 3 tentativas — em vez do
+        # genérico "confere o log do Photoshop" que não levava a lugar
+        # nenhum.
+        raise RuntimeError(resultado)
 
     print(f"\nThumbnail pronta        : {caminho_saida_png}")
     print(f"Host sem fundo           : {caminho_sem_fundo}")

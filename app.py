@@ -3258,13 +3258,107 @@ def _hhmmss_para_segundos(timestamp_str):
     return dt.hour * 3600 + dt.minute * 60 + dt.second
 
 
+def formatar_segundos_hhmmss(segundos, milissegundos=False):
+    """Segundos -> "HH:MM:SS" (ou "HH:MM:SS.mmm", que o ffmpeg também aceita em -ss)."""
+    segundos = max(0.0, float(segundos))
+    if milissegundos:
+        h = int(segundos // 3600)
+        m = int((segundos % 3600) // 60)
+        s = segundos % 60
+        return f"{h:02d}:{m:02d}:{s:06.3f}"
+    h, resto = divmod(int(segundos), 3600)
+    m, s = divmod(resto, 60)
+    return f"{h:02d}:{m:02d}:{s:02d}"
+
+
+class PlayerScrubber:
+    """
+    O "player" simplificado usado pra navegar por um trecho da live:
+    imagem do frame, timestamp, slider e botões de ajuste fino (±10s,
+    ±1s, ±1 frame). Não é vídeo rodando de verdade (isso exigiria
+    decodificar vídeo dentro do Tkinter, bem mais pesado) — é "arrasta e
+    vê o frame extraído na hora".
+
+    Compartilhado entre a escolha de frame da thumbnail
+    (abrir_scrubber_live) e o editor de trechos removidos
+    (abrir_editor_trechos): cada um monta o resto da janela em volta.
+    """
+
+    def __init__(self, janela, path, inicio, fim, duracao_frame, caminho_frame, mostrar_milissegundos=False):
+        self.path = path
+        self.caminho_frame = caminho_frame
+        self.mostrar_milissegundos = mostrar_milissegundos
+        self.posicao = float(inicio)
+        self._imagem = None  # referência guardada pra imagem não ser coletada como lixo
+
+        self.lbl_imagem = tk.Label(janela, bg="#000000")
+        self.lbl_imagem.pack(padx=10, pady=10)
+
+        self.lbl_timestamp = tk.Label(
+            janela, text="00:00:00", bg="#7F14B7", fg="#FEF500", font=("Industry-Black", 10, "bold")
+        )
+        self.lbl_timestamp.pack()
+
+        self.slider = tk.Scale(
+            janela, from_=inicio, to=fim, orient="horizontal",
+            length=640, showvalue=False, bg="#7F14B7", fg="#FEF500", troughcolor="#FFFFFF"
+        )
+        self.slider.pack(padx=10, pady=5)
+        self.slider.bind("<ButtonRelease-1>", lambda event: self._atualizar_frame(self.slider.get()))
+
+        frame_ajuste_fino = tk.Frame(janela, bg="#7F14B7")
+        frame_ajuste_fino.pack(pady=5)
+        for rotulo, delta in [("-10s", -10), ("-1s", -1), ("-1 frame", -duracao_frame),
+                               ("+1 frame", duracao_frame), ("+1s", 1), ("+10s", 10)]:
+            tk.Button(
+                frame_ajuste_fino, text=rotulo, command=lambda d=delta: self.ajustar(d),
+                bg="#FEF500", fg="#7F14B7", font=("Industry-Black", 9, "bold")
+            ).pack(side="left", padx=3)
+
+    def tem_frame(self):
+        return self._imagem is not None
+
+    def _atualizar_frame(self, segundos):
+        segundos = float(segundos)
+        self.posicao = segundos
+        self.lbl_timestamp.config(text=formatar_segundos_hhmmss(segundos, self.mostrar_milissegundos))
+
+        # Com fração de segundo (milissegundo) — precisão de segundo
+        # inteiro não é suficiente pra navegar frame a frame
+        resultado_ffmpeg = subprocess.run(
+            ["ffmpeg", "-y", "-ss", formatar_segundos_hhmmss(segundos, milissegundos=True),
+             "-i", self.path, "-frames:v", "1", self.caminho_frame],
+            capture_output=True, text=True
+        )
+        if resultado_ffmpeg.returncode == 0 and os.path.exists(self.caminho_frame):
+            img = Image.open(self.caminho_frame)
+            img.thumbnail((640, 360))
+            self._imagem = ImageTk.PhotoImage(img)
+            self.lbl_imagem.config(image=self._imagem)
+
+    def ir_para(self, segundos):
+        """Vai pra um ponto exato (com fração de segundo), respeitando a faixa do slider."""
+        segundos = max(self.slider.cget("from"), min(self.slider.cget("to"), segundos))
+        self.slider.set(int(segundos))
+        self._atualizar_frame(segundos)
+
+    def ajustar(self, delta):
+        # Sempre parte de self.posicao (fração de segundo), não do
+        # slider (só tem precisão de segundo inteiro) — senão ajuste de
+        # frame não tem efeito nenhum depois de arredondar
+        self.ir_para(self.posicao + delta)
+
+    def definir_faixa(self, inicio, fim):
+        self.slider.config(from_=inicio, to=fim)
+        self.slider.set(inicio)
+        self._atualizar_frame(inicio)
+
+
 def abrir_scrubber_live(titulo_janela="Escolher frame da live", seg_atual=None):
     """
-    Player simplificado com slider pra navegar por um trecho da live —
-    arrasta e solta o slider pra ver o frame daquele momento, e
-    confirma quando achar um bom. Não é vídeo rodando de verdade (isso
-    exigiria decodificar vídeo dentro do Tkinter, bem mais pesado) —
-    é "arrasta e vê o frame extraído na hora".
+    Janela pra escolher um frame da live: arrasta e solta o slider pra
+    ver o frame daquele momento, e confirma quando achar um bom (o player
+    em si é o PlayerScrubber).
 
     Por padrão o slider fica limitado ao capítulo atual (bem mais
     sensível que cobrir a live inteira de uma vez, já que a faixa é bem
@@ -3319,86 +3413,13 @@ def abrir_scrubber_live(titulo_janela="Escolher frame da live", seg_atual=None):
     combo_faixa = Combobox(janela, textvariable=var_faixa, values=list(faixas.keys()), state="readonly", width=55)
     combo_faixa.pack(pady=5)
 
-    lbl_imagem = tk.Label(janela, bg="#000000")
-    lbl_imagem.pack(padx=10, pady=10)
-
-    lbl_timestamp = tk.Label(
-        janela, text="00:00:00", bg="#7F14B7", fg="#FEF500", font=("Industry-Black", 10, "bold")
-    )
-    lbl_timestamp.pack()
-
-    imagem_ref = {"img": None}
-    posicao_atual = {"segundos": 0.0}
-
-    def formatar_ts_exibicao(segundos):
-        segundos_int = int(segundos)
-        h, resto = divmod(segundos_int, 3600)
-        m, s = divmod(resto, 60)
-        return f"{h:02d}:{m:02d}:{s:02d}"
-
-    def formatar_ts_ffmpeg(segundos):
-        # Com fração de segundo (milissegundo) — precisão de segundo
-        # inteiro não é suficiente pra navegar frame a frame
-        h = int(segundos // 3600)
-        m = int((segundos % 3600) // 60)
-        s = segundos % 60
-        return f"{h:02d}:{m:02d}:{s:06.3f}"
-
-    def atualizar_frame(segundos):
-        segundos = float(segundos)
-        posicao_atual["segundos"] = segundos
-        lbl_timestamp.config(text=formatar_ts_exibicao(segundos))
-
-        resultado_ffmpeg = subprocess.run(
-            ["ffmpeg", "-y", "-ss", formatar_ts_ffmpeg(segundos), "-i", path, "-frames:v", "1", caminho_preview],
-            capture_output=True, text=True
-        )
-        if resultado_ffmpeg.returncode == 0 and os.path.exists(caminho_preview):
-            img = Image.open(caminho_preview)
-            img.thumbnail((640, 360))
-            img_tk = ImageTk.PhotoImage(img)
-            imagem_ref["img"] = img_tk  # evita a imagem ser coletada como lixo
-            lbl_imagem.config(image=img_tk)
-
-    def ao_soltar_slider(event):
-        atualizar_frame(slider.get())
-
     inicio_padrao, fim_padrao = faixas[nome_padrao]
+    player = PlayerScrubber(janela, path, inicio_padrao, fim_padrao, duracao_frame, caminho_preview)
 
-    slider = tk.Scale(
-        janela, from_=inicio_padrao, to=fim_padrao, orient="horizontal",
-        length=640, showvalue=False, bg="#7F14B7", fg="#FEF500", troughcolor="#FFFFFF"
-    )
-    slider.pack(padx=10, pady=5)
-    slider.bind("<ButtonRelease-1>", ao_soltar_slider)
-
-    def trocar_faixa(event=None):
-        inicio, fim = faixas[var_faixa.get()]
-        slider.config(from_=inicio, to=fim)
-        slider.set(inicio)
-        atualizar_frame(inicio)
-
-    combo_faixa.bind("<<ComboboxSelected>>", trocar_faixa)
-
-    def ajustar(delta):
-        # Sempre parte de posicao_atual (fração de segundo), não do
-        # slider (só tem precisão de segundo inteiro) — senão ajuste de
-        # frame não tem efeito nenhum depois de arredondar
-        novo_valor = max(slider.cget("from"), min(slider.cget("to"), posicao_atual["segundos"] + delta))
-        slider.set(int(novo_valor))
-        atualizar_frame(novo_valor)
-
-    frame_ajuste_fino = tk.Frame(janela, bg="#7F14B7")
-    frame_ajuste_fino.pack(pady=5)
-    for rotulo, delta in [("-10s", -10), ("-1s", -1), ("-1 frame", -duracao_frame),
-                           ("+1 frame", duracao_frame), ("+1s", 1), ("+10s", 10)]:
-        tk.Button(
-            frame_ajuste_fino, text=rotulo, command=lambda d=delta: ajustar(d),
-            bg="#FEF500", fg="#7F14B7", font=("Industry-Black", 9, "bold")
-        ).pack(side="left", padx=3)
+    combo_faixa.bind("<<ComboboxSelected>>", lambda event: player.definir_faixa(*faixas[var_faixa.get()]))
 
     def confirmar():
-        if imagem_ref["img"] is None:
+        if not player.tem_frame():
             messagebox.showinfo("Aviso", "Mexe no slider primeiro pra escolher um frame.")
             return
         resultado["caminho"] = caminho_preview
@@ -3409,10 +3430,345 @@ def abrir_scrubber_live(titulo_janela="Escolher frame da live", seg_atual=None):
         bg="#FEF500", fg="#7F14B7", font=("Industry-Black", 10, "bold")
     ).pack(pady=10)
 
-    atualizar_frame(inicio_padrao)
+    player.ir_para(inicio_padrao)
 
     janela.wait_window()
     return resultado["caminho"]
+
+
+def mesclar_intervalos(intervalos):
+    """Ordena e junta intervalos [início, fim] que se sobrepõem ou se encostam."""
+    mesclados = []
+    for inicio, fim in sorted(intervalos):
+        if mesclados and inicio <= mesclados[-1][1]:
+            mesclados[-1][1] = max(mesclados[-1][1], fim)
+        else:
+            mesclados.append([inicio, fim])
+    return mesclados
+
+
+def formatar_duracao_curta(segundos):
+    """Duração legível: 75.4 -> "1:15.4"."""
+    segundos = max(0.0, float(segundos))
+    return f"{int(segundos // 60)}:{segundos % 60:04.1f}"
+
+
+def texto_botao_trechos(title):
+    """Texto do botão ✂ na linha do capítulo: mostra quantos trechos estão marcados pra sair."""
+    quantidade = len(trechos_removidos.get(title, []))
+    return f"✂ {quantidade}" if quantidade else "✂"
+
+
+def atualizar_botao_trechos(title):
+    info = capitulos_vars.get(title)
+    botao = info.get("btn_trechos") if info else None
+    if botao is not None and botao.winfo_exists():
+        botao.config(text=texto_botao_trechos(title))
+
+
+_TEMPO_TRECHO = r"(?:\d{1,2}:)?\d{1,2}:\d{1,2}(?:[.,]\d{1,3})?"
+PADRAO_LINHA_TRECHO = re.compile(
+    rf"^({_TEMPO_TRECHO})\s*(?:->|→|–|—|-|\baté\b|\ba\b)\s*({_TEMPO_TRECHO})$", re.IGNORECASE
+)
+
+
+def interpretar_tempo_trecho(texto):
+    """"HH:MM:SS" ou "MM:SS", com milissegundos opcionais (".500" ou ",500") -> segundos. None se não for um tempo válido."""
+    try:
+        numeros = [float(parte) for parte in texto.strip().replace(",", ".").split(":")]
+    except ValueError:
+        return None
+
+    if len(numeros) == 3:
+        horas, minutos, segundos = numeros
+    elif len(numeros) == 2:
+        horas = 0
+        minutos, segundos = numeros
+    else:
+        return None
+
+    if minutos >= 60 or segundos >= 60:
+        return None
+    return round(horas * 3600 + minutos * 60 + segundos, 3)
+
+
+def formatar_tempo_trecho(segundos):
+    """Como o tempo aparece na caixa de texto dos trechos: sem milissegundos quando eles são zero."""
+    tem_milissegundos = round(segundos * 1000) % 1000 != 0
+    return formatar_segundos_hhmmss(segundos, milissegundos=tem_milissegundos)
+
+
+def interpretar_texto_trechos(texto, inicio_cap, fim_cap):
+    """
+    Lê a caixa de texto do editor de trechos: um trecho a REMOVER por
+    linha, no formato "início - fim", nos tempos da live (os mesmos da
+    caixa de timestamps). Linha em branco é ignorada.
+
+    Devolve (intervalos, erros): os intervalos válidos como [início, fim]
+    em segundos, e uma mensagem por linha com problema (formato, fim
+    antes do início, ou trecho inteiro fora do capítulo). Trecho que só
+    passa um pouco da borda do capítulo é aceito — é aparado na hora do
+    corte.
+    """
+    intervalos = []
+    erros = []
+    for numero, linha in enumerate(texto.splitlines(), start=1):
+        linha = linha.strip()
+        if not linha:
+            continue
+
+        casou = PADRAO_LINHA_TRECHO.match(linha)
+        inicio = interpretar_tempo_trecho(casou.group(1)) if casou else None
+        fim = interpretar_tempo_trecho(casou.group(2)) if casou else None
+        if inicio is None or fim is None:
+            erros.append(
+                f"Linha {numero}: não entendi \"{linha}\" — use início - fim, ex: 00:12:30 - 00:14:10"
+            )
+            continue
+
+        if fim <= inicio:
+            erros.append(
+                f"Linha {numero}: o fim ({formatar_tempo_trecho(fim)}) precisa ser depois do início "
+                f"({formatar_tempo_trecho(inicio)})"
+            )
+            continue
+
+        if fim <= inicio_cap or inicio >= fim_cap:
+            erros.append(
+                f"Linha {numero}: o trecho fica fora do capítulo, que vai de "
+                f"{formatar_tempo_trecho(inicio_cap)} a {formatar_tempo_trecho(fim_cap)}"
+            )
+            continue
+
+        intervalos.append([inicio, fim])
+
+    return intervalos, erros
+
+
+def abrir_editor_trechos(title, seg):
+    """
+    Janela pra marcar os trechos que devem SAIR de dentro de um capítulo
+    (ex: um ad no meio do assunto). O corte desse capítulo passa a sair
+    sem esses pedaços, com o resto emendado (ver _cortar_um).
+
+    Os trechos ficam numa caixa de TEXTO, um por linha ("início - fim",
+    nos tempos da live) — dá pra digitar ou colar direto, do mesmo jeito
+    que os timestamps dos capítulos. O player é opcional: "Marcar início"
+    e "Marcar fim" escrevem uma linha nova na caixa, e "Ir pro início/fim"
+    levam o player até a linha onde o cursor está, pra conferir o ponto.
+
+    Nada é gravado até clicar em Salvar, e Salvar não aceita linha com
+    erro.
+    """
+    path = get_video_source()
+    if not path:
+        return
+
+    duracao_total = obter_duracao_video(path)
+    if not duracao_total:
+        messagebox.showerror("Erro", "Não consegui determinar a duração do vídeo.")
+        return
+
+    duracao_frame = 1.0 / obter_fps_video(path)
+    inicio_cap = _hhmmss_para_segundos(seg["start"])
+    fim_cap = _hhmmss_para_segundos(seg["end"]) if seg["end"] else duracao_total
+
+    def _linha_de(inicio, fim):
+        return f"{formatar_tempo_trecho(inicio)} - {formatar_tempo_trecho(fim)}"
+
+    texto_inicial = "\n".join(_linha_de(inicio, fim) for inicio, fim in trechos_removidos.get(title, []))
+    marcado = {"inicio": None}
+
+    janela = tk.Toplevel(tela)
+    janela.title(f"Trechos removidos — {title}")
+    janela.configure(bg="#7F14B7")
+    janela.grab_set()
+
+    tk.Label(
+        janela,
+        text="Marque o começo e o fim de cada trecho que deve SAIR do corte (ex: um ad).",
+        bg="#7F14B7", fg="#FEF500", font=("Industry-Black", 9, "bold")
+    ).pack(pady=(10, 0))
+
+    player = PlayerScrubber(
+        janela, path, inicio_cap, fim_cap, duracao_frame,
+        os.path.join(PASTA_BASE, "_frame_editor_trechos.jpg"), mostrar_milissegundos=True
+    )
+
+    # ---- Marcar pelo player ----
+    frame_marcar = tk.Frame(janela, bg="#7F14B7")
+    frame_marcar.pack(pady=(8, 2))
+
+    lbl_marcado = tk.Label(
+        janela, text="", bg="#7F14B7", fg="#FFFFFF", font=("Industry-Black", 8)
+    )
+
+    def _marcar_inicio():
+        marcado["inicio"] = player.posicao
+        lbl_marcado.config(
+            text=f"Início marcado em {formatar_tempo_trecho(player.posicao)} — agora vá até o fim do trecho "
+                 "e clique em \"Marcar fim\"."
+        )
+
+    def _marcar_fim():
+        if marcado["inicio"] is None:
+            messagebox.showinfo("Trechos", "Marque o início do trecho primeiro.", parent=janela)
+            return
+        inicio, fim = marcado["inicio"], player.posicao
+        if fim <= inicio:
+            messagebox.showinfo(
+                "Trechos",
+                f"O fim ({formatar_tempo_trecho(fim)}) precisa ser depois do início marcado "
+                f"({formatar_tempo_trecho(inicio)}).",
+                parent=janela
+            )
+            return
+
+        # Escreve o trecho como uma linha nova no fim da caixa de texto.
+        conteudo = caixa.get("1.0", "end-1c")
+        if conteudo and not conteudo.endswith("\n"):
+            caixa.insert(tk.END, "\n")
+        caixa.insert(tk.END, _linha_de(inicio, fim) + "\n")
+        caixa.see(tk.END)
+
+        marcado["inicio"] = None
+        lbl_marcado.config(text="")
+        _atualizar_resumo()
+
+    tk.Button(
+        frame_marcar, text="[ Marcar início", command=_marcar_inicio,
+        bg="#FEF500", fg="#7F14B7", font=("Industry-Black", 9, "bold")
+    ).pack(side="left", padx=4)
+    tk.Button(
+        frame_marcar, text="Marcar fim ]", command=_marcar_fim,
+        bg="#FEF500", fg="#7F14B7", font=("Industry-Black", 9, "bold")
+    ).pack(side="left", padx=4)
+    lbl_marcado.pack()
+
+    # ---- Caixa de texto: um trecho por linha ----
+    tk.Label(
+        janela,
+        text="Um trecho por linha, nos tempos da live:  início - fim   (ex: 00:12:30 - 00:14:10, "
+             "ou com milissegundos, 00:12:30.500). Pode digitar ou colar.",
+        bg="#7F14B7", fg="#FFFFFF", font=("Industry-Black", 8), wraplength=640, justify="left"
+    ).pack(padx=10, pady=(6, 0), anchor="w")
+
+    frame_caixa = tk.Frame(janela, bg="#7F14B7")
+    frame_caixa.pack(padx=10, pady=(2, 2), fill="x")
+    caixa = tk.Text(frame_caixa, height=5, font=("Consolas", 11), undo=True, wrap="none")
+    barra_caixa = tk.Scrollbar(frame_caixa, orient="vertical", command=caixa.yview)
+    caixa.configure(yscrollcommand=barra_caixa.set)
+    caixa.pack(side="left", fill="x", expand=True)
+    barra_caixa.pack(side="right", fill="y")
+    caixa.insert("1.0", texto_inicial + ("\n" if texto_inicial else ""))
+    caixa.edit_reset()
+
+    lbl_resumo = tk.Label(
+        janela, text="", bg="#7F14B7", fg="#FFFFFF", font=("Industry-Black", 9), wraplength=640, justify="left"
+    )
+
+    def _ler_caixa():
+        return interpretar_texto_trechos(caixa.get("1.0", "end-1c"), inicio_cap, fim_cap)
+
+    def _atualizar_resumo(event=None):
+        intervalos, erros = _ler_caixa()
+        if erros:
+            lbl_resumo.config(text="⚠️ " + erros[0], fg="#FFD400")
+            return
+
+        mantidos = calcular_trechos_mantidos(inicio_cap, fim_cap, intervalos)
+        if not mantidos:
+            lbl_resumo.config(
+                text="⚠️ Os trechos marcados cobrem o capítulo inteiro — não sobra nada pra cortar.", fg="#FFD400"
+            )
+            return
+
+        emendas = len(mantidos) - 1
+        duracao_final = sum(fim - inicio for inicio, fim in mantidos)
+        if emendas and transicao_emenda_var.get():
+            duracao_final -= emendas * TRANSICAO_EMENDA_SEGUNDOS
+        texto_emendas = "sem emenda" if emendas == 0 else ("1 emenda" if emendas == 1 else f"{emendas} emendas")
+        lbl_resumo.config(
+            text=f"Corte final: {formatar_duracao_curta(duracao_final)}   "
+                 f"(capítulo inteiro: {formatar_duracao_curta(fim_cap - inicio_cap)}, {texto_emendas})",
+            fg="#FFFFFF"
+        )
+
+    caixa.bind("<KeyRelease>", _atualizar_resumo)
+    # Colar/recortar/desfazer pelo mouse ou atalho não passam por
+    # KeyRelease de forma confiável — <<Modified>> pega todos os casos.
+    def _ao_modificar(event=None):
+        if caixa.edit_modified():
+            caixa.edit_modified(False)
+            _atualizar_resumo()
+
+    caixa.bind("<<Modified>>", _ao_modificar)
+
+    def _ir_para(ponta):
+        linha = caixa.get("insert linestart", "insert lineend")
+        intervalos, erros = interpretar_texto_trechos(linha, float("-inf"), float("inf"))
+        if erros or not intervalos:
+            messagebox.showinfo(
+                "Trechos", "Coloque o cursor numa linha da caixa que tenha um trecho válido.", parent=janela
+            )
+            return
+        player.ir_para(intervalos[0][ponta])
+
+    lbl_resumo.pack(pady=(4, 2))
+
+    # Os botões de baixo ficam todos numa linha só: a janela já é alta
+    # (o frame tem 360 px), e mais uma linha podia empurrar o Salvar pra
+    # fora de telas menores.
+    frame_acoes = tk.Frame(janela, bg="#7F14B7")
+    frame_acoes.pack(pady=(4, 10))
+    for rotulo, ponta in [("Ir pro início da linha", 0), ("Ir pro fim da linha", 1)]:
+        tk.Button(
+            frame_acoes, text=rotulo, command=lambda p=ponta: _ir_para(p),
+            bg="#FFFFFF", fg="#7F14B7", font=("Industry-Black", 8, "bold")
+        ).pack(side="left", padx=3)
+
+    # ---- Salvar / cancelar ----
+    def _salvar():
+        intervalos, erros = _ler_caixa()
+        if erros:
+            messagebox.showerror(
+                "Trechos",
+                "Corrija antes de salvar:\n\n" + "\n".join(erros),
+                parent=janela
+            )
+            return
+
+        intervalos = mesclar_intervalos(intervalos)
+        if intervalos:
+            trechos_removidos[title] = [[round(inicio, 3), round(fim, 3)] for inicio, fim in intervalos]
+        else:
+            trechos_removidos.pop(title, None)
+        salvar_estado_projeto()
+        atualizar_botao_trechos(title)
+        janela.destroy()
+
+    def _cancelar():
+        mudou = caixa.get("1.0", "end-1c").strip() != texto_inicial.strip()
+        if mudou and not messagebox.askyesno(
+            "Trechos", "Fechar sem salvar as mudanças nos trechos?", parent=janela
+        ):
+            return
+        janela.destroy()
+
+    tk.Button(
+        frame_acoes, text="Salvar", command=_salvar,
+        bg="#FEF500", fg="#7F14B7", font=("Industry-Black", 10, "bold")
+    ).pack(side="left", padx=(28, 5))
+    tk.Button(
+        frame_acoes, text="Cancelar", command=_cancelar,
+        bg="#FFFFFF", fg="#7F14B7", font=("Industry-Black", 10, "bold")
+    ).pack(side="left", padx=5)
+    janela.protocol("WM_DELETE_WINDOW", _cancelar)
+
+    _atualizar_resumo()
+    player.ir_para(inicio_cap)
+
+    janela.wait_window()
 
 
 def _fracao_van_der_corput(indice, base=2):
@@ -3838,6 +4194,28 @@ def _gerar_thumbnail_worker(title, caminho_frame_bruto, caminho_imagem_sugerida,
     tela.after(0, _finalizar_operacao_longa)
 
 
+def realocar_trechos_removidos(titulos_novos):
+    """
+    Os trechos removidos ficam guardados pelo título numerado do capítulo
+    ("3-Titulo"). Se uma linha é inserida ou tirada na caixa de
+    timestamps, a numeração muda e eles ficariam órfãos — aqui cada
+    entrada órfã é movida pro capítulo novo que tem o MESMO texto de
+    título (mesma lógica que carregar_capitulos usa pras checkboxes).
+    Entrada sem correspondente fica guardada como está, sem ser apagada.
+    """
+    def _sem_numero(titulo):
+        return titulo.split("-", 1)[1] if "-" in titulo else titulo
+
+    existentes = set(titulos_novos)
+    for antigo in [titulo for titulo in trechos_removidos if titulo not in existentes]:
+        candidatos = [
+            novo for novo in titulos_novos
+            if _sem_numero(novo) == _sem_numero(antigo) and novo not in trechos_removidos
+        ]
+        if candidatos:
+            trechos_removidos[candidatos[0]] = trechos_removidos.pop(antigo)
+
+
 def carregar_capitulos(estado_inicial=None):
     """
     Lê as timestamps coladas em txt_entrada e monta, pra cada capítulo, uma
@@ -3872,6 +4250,8 @@ def carregar_capitulos(estado_inicial=None):
     for widget in frame_capitulos.winfo_children():
         widget.destroy()
     capitulos_vars.clear()
+
+    realocar_trechos_removidos([seg["title"] for seg in segments])
 
     for seg in segments:
         texto_sem_numero = seg["title"].split("-", 1)[1] if "-" in seg["title"] else seg["title"]
@@ -3925,6 +4305,19 @@ def carregar_capitulos(estado_inicial=None):
             )
             btn_abrir_fim.pack(side="left", padx=2)
 
+        # Abre o editor de trechos removidos (tirar um ad do meio do
+        # capítulo). O número ao lado da tesoura é quantos trechos estão
+        # marcados pra sair.
+        btn_trechos = tk.Button(
+            row,
+            text=texto_botao_trechos(seg["title"]),
+            command=lambda t=seg["title"], s=seg: abrir_editor_trechos(t, s),
+            bg="#FEF500",
+            fg="#7F14B7",
+            font=("Industry-Black", 8, "bold")
+        )
+        btn_trechos.pack(side="left", padx=2)
+
         btn_thumbnail = tk.Button(
             row,
             text="🖼 Thumbnail",
@@ -3945,7 +4338,9 @@ def carregar_capitulos(estado_inicial=None):
         )
         btn_metadata.pack(side="left", padx=2)
 
-        capitulos_vars[seg["title"]] = {"corte": var_corte, "preview": var_preview, "seg": seg}
+        capitulos_vars[seg["title"]] = {
+            "corte": var_corte, "preview": var_preview, "seg": seg, "btn_trechos": btn_trechos,
+        }
 
     txt_saida.insert(tk.END, f"{len(segments)} capítulos carregados.\n")
     txt_saida.see(tk.END)

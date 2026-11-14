@@ -85,6 +85,7 @@ from gerar_metadata_capitulo import (
     gerar_mais_titulos, gerar_mais_textos_thumbnail, normalizar_opcoes_texto_thumbnail,
 )
 from verificar_template import verificar_template
+from fila_thumbnails import FilaThumbnails, NA_FILA, GERANDO, PRONTA, FALHOU
 from PIL import Image, ImageTk
 
 # Caminhos específicos da máquina — vêm do .env, não hardcoded, porque
@@ -4201,8 +4202,9 @@ def gerar_thumbnail_para_capitulo(title, seg):
 
     A parte interativa (escolher imagem, gerar/buscar metadata da IA,
     escolher frame) roda aqui, na thread principal, porque envolve
-    diálogo/janela — só a parte pesada (remoção de fundo + Photoshop)
-    vai pra thread separada, em _gerar_thumbnail_worker().
+    diálogo/janela — a parte pesada (remoção de fundo + Photoshop) entra
+    na fila de thumbnails e é feita em segundo plano, uma de cada vez,
+    por _processar_thumbnail_da_fila().
 
     Se esse capítulo tiver metadata gerado pela IA (veio de "Gerar
     capítulos automaticamente"), usa o texto de thumbnail que ela já
@@ -4252,46 +4254,80 @@ def gerar_thumbnail_para_capitulo(title, seg):
     if not caminho_frame_bruto:
         return
 
-    if not _iniciar_operacao_longa():
-        return
-
-    txt_saida.insert(tk.END, f"Gerando thumbnail pra \"{title}\" (pode demorar, o Photoshop vai abrir)...\n")
-    txt_saida.see(tk.END)
-
-    thread = threading.Thread(
-        target=_gerar_thumbnail_worker,
-        args=(title, caminho_frame_bruto, caminho_imagem_sugerida, linha1, linha2),
-        daemon=True,
-    )
-    thread.start()
-
-
-def _gerar_thumbnail_worker(title, caminho_frame_bruto, caminho_imagem_sugerida, linha1, linha2):
-    """
-    Roda numa thread separada — remoção de fundo + automação do
-    Photoshop, fora da thread principal, pra não travar a interface.
-
-    IMPORTANTE, diferente de corte/preview: o Photoshop via COM é uma
-    instância ÚNICA compartilhada (não como o ffmpeg, onde vários
-    processos rodam em paralelo sem problema) — duas automações
-    tentando mexer nele ao mesmo tempo se atropelam e corrompem uma à
-    outra. Por isso usa a MESMA trava de operação única de
-    corte/preview (_iniciar_operacao_longa/_finalizar_operacao_longa),
-    mesmo sendo uma operação diferente — nunca pode ter duas rodando
-    junto, seja thumbnail+thumbnail ou thumbnail+corte.
-    """
-    MAX_TENTATIVAS = 3
-    PAUSA_ENTRE_TENTATIVAS = 3  # segundos
-
-    pasta_thumbnail_raiz = None
+    # A pasta de saída é decidida AGORA, e não quando chegar a vez na
+    # fila: se o usuário trocar de projeto com thumbnails esperando, cada
+    # uma ainda vai pro projeto em que foi pedida.
     if PASTA_PROJETO_ATUAL:
         pasta_thumbnail_raiz = os.path.join(PASTA_PROJETO_ATUAL, "thumbnail")
         # Arquivos de trabalho (frame bruto, sem fundo) ficam numa
         # subpasta própria de cada corte — mais organizado. O .psd e o
-        # .png finais são movidos pra fora dessa subpasta logo abaixo.
+        # .png finais são movidos pra fora dessa subpasta no fim.
         pasta_saida_geracao = os.path.join(pasta_thumbnail_raiz, get_clean_title(title))
     else:
+        pasta_thumbnail_raiz = None
         pasta_saida_geracao = PASTA_SAIDA_THUMBNAILS
+
+    if not pasta_saida_geracao:
+        messagebox.showerror(
+            "Thumbnail",
+            "Não sei onde salvar a thumbnail: abra um projeto, ou defina PASTA_SAIDA_THUMBNAILS no .env."
+        )
+        return
+
+    # O frame escolhido é um arquivo TEMPORÁRIO (a grade de candidatos e
+    # o scrubber reaproveitam os mesmos nomes) — se ficasse só o caminho
+    # na fila, escolher o frame do próximo corte trocaria o deste. Por
+    # isso cada pedido guarda a sua própria cópia.
+    try:
+        os.makedirs(pasta_saida_geracao, exist_ok=True)
+        extensao = os.path.splitext(caminho_frame_bruto)[1] or ".jpg"
+        caminho_frame_do_pedido = os.path.join(
+            pasta_saida_geracao, f"frame_host_{int(time.time() * 1000)}{extensao}"
+        )
+        shutil.copy2(caminho_frame_bruto, caminho_frame_do_pedido)
+    except OSError as e:
+        messagebox.showerror("Thumbnail", f"Não consegui preparar o frame do host:\n\n{e}")
+        return
+
+    fila_thumbs.adicionar({
+        "title": title,
+        "caminho_frame": caminho_frame_do_pedido,
+        "caminho_imagem": caminho_imagem_sugerida,
+        "linha1": linha1,
+        "linha2": linha2,
+        "caminho_template": CAMINHO_TEMPLATE_THUMBNAIL,
+        "pasta_thumbnail_raiz": pasta_thumbnail_raiz,
+        "pasta_saida_geracao": pasta_saida_geracao,
+    })
+
+
+def _preparar_thread_fila_thumbnails():
+    """
+    Roda no começo da thread da fila. O Windows exige que cada thread que
+    fala com o Photoshop (COM) se registre antes — a thread principal faz
+    isso sozinha ao importar o pywin32, as outras não.
+    """
+    import pythoncom
+    pythoncom.CoInitialize()
+
+
+def _processar_thumbnail_da_fila(dados):
+    """
+    Gera UMA thumbnail — remoção de fundo + automação do Photoshop. Roda
+    na thread da fila (fila_thumbnails.py), uma de cada vez: o Photoshop
+    via COM é uma instância ÚNICA compartilhada, e duas automações
+    tentando mexer nele ao mesmo tempo se atropelam e corrompem uma à
+    outra. Não usa mais a trava de corte/preview: thumbnail e corte
+    podem rodar juntos, o que não pode é thumbnail + thumbnail.
+
+    Devolve {"png": caminho, "psd": caminho ou None}; levanta exceção com
+    o motivo se não conseguir depois das tentativas.
+    """
+    MAX_TENTATIVAS = 3
+    PAUSA_ENTRE_TENTATIVAS = 3  # segundos
+
+    title = dados["title"]
+    pasta_thumbnail_raiz = dados["pasta_thumbnail_raiz"]
 
     resultado_thumb = None
     erro_capturado = None
@@ -4305,19 +4341,19 @@ def _gerar_thumbnail_worker(title, caminho_frame_bruto, caminho_imagem_sugerida,
             from pipeline_thumbnail import montar_thumbnail_completa
 
             resultado_thumb = montar_thumbnail_completa(
-                CAMINHO_TEMPLATE_THUMBNAIL,
-                caminho_frame_bruto,
-                caminho_imagem_sugerida,
-                linha1,
-                linha2,
-                pasta_saida_geracao,
+                dados["caminho_template"],
+                dados["caminho_frame"],
+                dados["caminho_imagem"],
+                dados["linha1"],
+                dados["linha2"],
+                dados["pasta_saida_geracao"],
                 title,
                 lado_forcado=LADO_THUMBNAIL_PADRAO,
             )
             erro_capturado = None
         except Exception as e:
             resultado_thumb = None
-            erro_capturado = str(e)
+            erro_capturado = str(e) or type(e).__name__
 
         if resultado_thumb:
             break  # deu certo, não precisa tentar de novo
@@ -4328,54 +4364,220 @@ def _gerar_thumbnail_worker(title, caminho_frame_bruto, caminho_imagem_sugerida,
         # de novo antes de desistir de vez
         if tentativa < MAX_TENTATIVAS:
             tela.after(0, lambda t=tentativa: txt_saida.insert(
-                tk.END, f"Tentativa {t} falhou, tentando de novo em {PAUSA_ENTRE_TENTATIVAS}s...\n"
+                tk.END, f"Thumbnail de \"{title}\": tentativa {t} falhou, tentando de novo em {PAUSA_ENTRE_TENTATIVAS}s...\n"
             ))
             time.sleep(PAUSA_ENTRE_TENTATIVAS)
 
-    if erro_capturado and not resultado_thumb:
-        tela.after(0, lambda: txt_saida.insert(
-            tk.END, f"[ERRO INESPERADO] Falha ao gerar thumbnail de \"{title}\" após {MAX_TENTATIVAS} tentativas: {erro_capturado}\n"
-        ))
-        tela.after(0, lambda: messagebox.showerror(
-            "Erro ao gerar thumbnail",
-            f"Algo deu errado gerando a thumbnail de \"{title}\" (tentei {MAX_TENTATIVAS} vezes):\n\n{erro_capturado}\n\n"
-            "O programa continua funcionando normalmente — só essa thumbnail não foi gerada."
-        ))
-        tela.after(0, _finalizar_operacao_longa)
-        return
+    if not resultado_thumb:
+        raise RuntimeError(
+            f"{erro_capturado or 'o Photoshop não devolveu a thumbnail'} (tentei {MAX_TENTATIVAS} vezes)"
+        )
 
-    if resultado_thumb and pasta_thumbnail_raiz:
+    caminho_psd = re.sub(r"\.png$", ".psd", resultado_thumb, flags=re.IGNORECASE)
+    if not os.path.exists(caminho_psd):
+        caminho_psd = None
+
+    if pasta_thumbnail_raiz:
         # Reorganiza: .psd fica direto na raiz de thumbnail/ (fácil
         # acesso), .png final vai pra thumbnail/thumbs_feitas/ — só os
         # arquivos de trabalho continuam na subpasta própria do corte
         pasta_thumbs_feitas = os.path.join(pasta_thumbnail_raiz, "thumbs_feitas")
         os.makedirs(pasta_thumbs_feitas, exist_ok=True)
 
-        caminho_psd_gerado = re.sub(r"\.png$", ".psd", resultado_thumb, flags=re.IGNORECASE)
         destino_png = os.path.join(pasta_thumbs_feitas, os.path.basename(resultado_thumb))
-        destino_psd = os.path.join(pasta_thumbnail_raiz, os.path.basename(caminho_psd_gerado))
-
         try:
             shutil.move(resultado_thumb, destino_png)
             resultado_thumb = destino_png
-            if os.path.exists(caminho_psd_gerado):
-                shutil.move(caminho_psd_gerado, destino_psd)
+            if caminho_psd:
+                destino_psd = os.path.join(pasta_thumbnail_raiz, os.path.basename(caminho_psd))
+                shutil.move(caminho_psd, destino_psd)
+                caminho_psd = destino_psd
         except OSError as e:
             tela.after(0, lambda e=e: txt_saida.insert(
                 tk.END, f"[AVISO] Thumbnail gerada, mas não consegui reorganizar os arquivos: {e}\n"
             ))
 
-    if resultado_thumb:
-        tela.after(0, lambda: txt_saida.insert(tk.END, f"Thumbnail pronta: {resultado_thumb}\n"))
-        tela.after(0, lambda: messagebox.showinfo(
-            "Thumbnail", "Pronta! Revisa o .psd antes de publicar (posição/tamanho do host, sombra)."
-        ))
-    else:
-        tela.after(0, lambda: txt_saida.insert(
-            tk.END, f"Falha ao gerar thumbnail de \"{title}\" — confere o log do Photoshop.\n"
-        ))
-    tela.after(0, lambda: txt_saida.see(tk.END))
-    tela.after(0, _finalizar_operacao_longa)
+    return {"png": resultado_thumb, "psd": caminho_psd}
+
+
+def _ao_mudar_fila_thumbnails(evento, item):
+    # Chamado de dentro da thread da fila — repassa pra thread principal,
+    # que é a única que pode mexer nos widgets.
+    tela.after(0, lambda: _atualizar_interface_fila_thumbnails(evento, item))
+
+
+fila_thumbs = FilaThumbnails(
+    _processar_thumbnail_da_fila,
+    ao_mudar=_ao_mudar_fila_thumbnails,
+    preparar_thread=_preparar_thread_fila_thumbnails,
+)
+
+# Janela "Fila de thumbnails" (só existe enquanto está aberta) e as
+# falhas que ainda não foram avisadas ao usuário.
+_janela_fila_thumbnails = {"janela": None, "redesenhar": None}
+_falhas_thumbnail_nao_avisadas = []
+
+
+def texto_botao_fila_thumbnails():
+    """Texto do botão da tela principal: mostra o que a fila está fazendo agora."""
+    contagem = fila_thumbs.contagem()
+    partes = []
+    if contagem[GERANDO]:
+        partes.append("gerando 1")
+    if contagem[NA_FILA]:
+        partes.append(f"{contagem[NA_FILA]} na fila")
+    if contagem[FALHOU]:
+        partes.append(f"{contagem[FALHOU]} com erro")
+    if not partes and contagem[PRONTA]:
+        partes.append(f"{contagem[PRONTA]} pronta" + ("s" if contagem[PRONTA] > 1 else ""))
+    return "Fila de thumbnails" + (f" ({', '.join(partes)})" if partes else "")
+
+
+def _atualizar_interface_fila_thumbnails(evento, item):
+    """Roda na thread principal a cada mudança da fila: log, botão, janela da fila e aviso de erro."""
+    titulo = item["dados"]["title"] if item else ""
+
+    if evento == "adicionada":
+        txt_saida.insert(tk.END, f"Thumbnail de \"{titulo}\" entrou na fila.\n")
+    elif evento == "gerando":
+        txt_saida.insert(tk.END, f"Gerando thumbnail de \"{titulo}\" (o Photoshop vai trabalhar em segundo plano)...\n")
+    elif evento == "pronta":
+        txt_saida.insert(tk.END, f"Thumbnail pronta: {item['resultado']['png']}\n")
+    elif evento == "falhou":
+        txt_saida.insert(tk.END, f"[ERRO] Thumbnail de \"{titulo}\" falhou: {item['erro']}\n")
+        _falhas_thumbnail_nao_avisadas.append(titulo)
+    txt_saida.see(tk.END)
+
+    btn_fila_thumbnails.config(text=texto_botao_fila_thumbnails())
+    if _janela_fila_thumbnails["redesenhar"] is not None:
+        _janela_fila_thumbnails["redesenhar"]()
+
+    if evento == "ociosa":
+        # Um aviso só quando a fila toda termina — um por thumbnail
+        # interromperia o trabalho a cada uma que ficasse pronta.
+        tocar_som_conclusao()
+        if _falhas_thumbnail_nao_avisadas:
+            falhas = list(_falhas_thumbnail_nao_avisadas)
+            _falhas_thumbnail_nao_avisadas.clear()
+            messagebox.showerror(
+                "Fila de thumbnails",
+                "A fila terminou, mas não consegui gerar:\n\n"
+                + "\n".join(f"- {t}" for t in falhas)
+                + "\n\nAbra \"Fila de thumbnails\" pra ver o motivo de cada uma e tentar de novo. "
+                "O resto do programa continua funcionando normalmente."
+            )
+
+
+def abrir_janela_fila_thumbnails():
+    """
+    Janela (não modal) com as thumbnails pedidas nessa sessão: o estado
+    de cada uma, atalhos pra abrir o .png e o .psd das prontas, o motivo
+    e "tentar de novo" das que falharam, e "tirar da fila" das que ainda
+    estão esperando.
+    """
+    janela = _janela_fila_thumbnails["janela"]
+    if janela is not None and janela.winfo_exists():
+        janela.lift()
+        janela.focus_set()
+        return
+
+    janela = tk.Toplevel(tela)
+    janela.title("Fila de thumbnails")
+    janela.geometry("620x380")
+    janela.minsize(480, 220)
+    janela.configure(bg="#7F14B7")
+
+    # O rodapé é empacotado ANTES da lista (preso embaixo): assim, numa
+    # janela baixa, quem encolhe é a lista, e não o rodapé que some.
+    rodape = tk.Frame(janela, bg="#7F14B7")
+    rodape.pack(side="bottom", fill="x", padx=10, pady=(4, 10))
+
+    area = tk.Frame(janela, bg="#7F14B7")
+    area.pack(fill="both", expand=True, padx=10, pady=(10, 4))
+    canvas = tk.Canvas(area, bg="#FFFFFF", highlightthickness=0)
+    barra = tk.Scrollbar(area, orient="vertical", command=canvas.yview)
+    corpo = tk.Frame(canvas, bg="#FFFFFF")
+    corpo.bind("<Configure>", lambda e: canvas.configure(scrollregion=canvas.bbox("all")))
+    id_corpo = canvas.create_window((0, 0), window=corpo, anchor="nw")
+    canvas.bind("<Configure>", lambda e: canvas.itemconfig(id_corpo, width=e.width))
+    canvas.configure(yscrollcommand=barra.set)
+    canvas.pack(side="left", fill="both", expand=True)
+    barra.pack(side="right", fill="y")
+
+    SIMBOLOS = {NA_FILA: "…", GERANDO: "▶", PRONTA: "✓", FALHOU: "✕"}
+    CORES = {NA_FILA: "#555555", GERANDO: "#7F14B7", PRONTA: "#1B7F2A", FALHOU: "#B00020"}
+
+    def _botao(pai, texto, comando):
+        tk.Button(
+            pai, text=texto, command=comando,
+            bg="#FEF500", fg="#7F14B7", font=("Industry-Black", 8, "bold")
+        ).pack(side="right", padx=2)
+
+    def _abrir_arquivo(caminho):
+        if caminho and os.path.exists(caminho):
+            os.startfile(caminho)
+        else:
+            messagebox.showinfo("Fila de thumbnails", "Não achei mais esse arquivo no disco.", parent=janela)
+
+    def _redesenhar():
+        if not janela.winfo_exists():
+            return
+        for widget in corpo.winfo_children():
+            widget.destroy()
+
+        itens = fila_thumbs.itens()
+        if not itens:
+            tk.Label(
+                corpo, text="Nenhuma thumbnail pedida ainda — use o botão \"🖼 Thumbnail\" de um capítulo.",
+                bg="#FFFFFF", fg="#555555", font=("Industry-Black", 9), wraplength=540, justify="left"
+            ).pack(anchor="w", padx=8, pady=8)
+            return
+
+        for item in itens:
+            estado = item["estado"]
+            linha = tk.Frame(corpo, bg="#FFFFFF")
+            linha.pack(fill="x", padx=6, pady=2)
+
+            if estado == PRONTA:
+                resultado = item["resultado"] or {}
+                if resultado.get("psd"):
+                    _botao(linha, "Abrir .psd", lambda c=resultado["psd"]: _abrir_arquivo(c))
+                _botao(linha, "Abrir .png", lambda c=resultado.get("png"): _abrir_arquivo(c))
+            elif estado == FALHOU:
+                _botao(linha, "Tentar de novo", lambda i=item: fila_thumbs.tentar_de_novo(i))
+                _botao(linha, "Ver erro", lambda i=item: messagebox.showerror(
+                    "Fila de thumbnails", f"Thumbnail de \"{i['dados']['title']}\":\n\n{i['erro']}", parent=janela
+                ))
+            elif estado == NA_FILA:
+                _botao(linha, "Tirar da fila", lambda i=item: fila_thumbs.remover(i))
+
+            tk.Label(
+                linha, text=f"{SIMBOLOS.get(estado, '?')} {estado}", width=11, anchor="w",
+                bg="#FFFFFF", fg=CORES.get(estado, "#000000"), font=("Industry-Black", 9, "bold")
+            ).pack(side="left")
+            tk.Label(
+                linha, text=item["dados"]["title"], anchor="w",
+                bg="#FFFFFF", fg="#000000", font=("Industry-Black", 9)
+            ).pack(side="left", fill="x", expand=True)
+
+    tk.Button(
+        rodape, text="Limpar concluídas", command=fila_thumbs.limpar_concluidas,
+        bg="#FFFFFF", fg="#7F14B7", font=("Industry-Black", 8, "bold")
+    ).pack(side="left")
+    tk.Label(
+        rodape, text="As thumbnails saem uma de cada vez, em segundo plano.",
+        bg="#7F14B7", fg="#FFFFFF", font=("Industry-Black", 8)
+    ).pack(side="left", padx=10)
+
+    def _fechar():
+        _janela_fila_thumbnails["janela"] = None
+        _janela_fila_thumbnails["redesenhar"] = None
+        janela.destroy()
+
+    janela.protocol("WM_DELETE_WINDOW", _fechar)
+    _janela_fila_thumbnails["janela"] = janela
+    _janela_fila_thumbnails["redesenhar"] = _redesenhar
+    _redesenhar()
 
 
 def realocar_trechos_removidos(titulos_novos):
@@ -4914,6 +5116,11 @@ btn_criar_cortes.pack(side="left", padx=15)
 btn_criar_previews = tk.Button(frame_botoes, text="Criar preview de cortes", command=generate_clips_preview, bg="#FEF500", fg="#7F14B7", font=("Industry-Black", 10, "bold"))
 btn_criar_previews.pack(side="left", padx=15)
 
+# Abre a janela da fila de thumbnails; o texto do botão mostra o que a
+# fila está fazendo agora (ver texto_botao_fila_thumbnails).
+btn_fila_thumbnails = tk.Button(frame_botoes, text="Fila de thumbnails", command=abrir_janela_fila_thumbnails, bg="#FEF500", fg="#7F14B7", font=("Industry-Black", 10, "bold"))
+btn_fila_thumbnails.pack(side="left", padx=15)
+
 
 
 lbl_saida = tk.Label(frame_conteudo, text="Progresso:", bg="#7F14B7", fg="#FEF500", font=("Industry-Black", 12, "bold"))
@@ -5239,7 +5446,7 @@ def confirmar_fechar_programa():
     avisa antes: fechar no meio pode deixar arquivo pela metade ou
     travar o Photoshop com o documento ainda aberto.
     """
-    if _operacao_longa_ativa["valor"]:
+    if _operacao_longa_ativa["valor"] or fila_thumbs.ocupada():
         if not messagebox.askyesno(
             "Operação em andamento",
             "Tem uma operação rodando agora (corte, preview ou thumbnail).\n\n"
